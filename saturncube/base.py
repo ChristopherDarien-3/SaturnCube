@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .optim import make_optimizer
+
 REGISTRY: dict = {}
 
 
@@ -45,19 +47,23 @@ class BaseModel:
         obj._init_args = (args, kwargs)  # lets load() rebuild the same object
         return obj
 
-    def __init__(self, input_dim=None, output_dim=None, task="auto", lr=3e-3,
+    def __init__(self, input_dim=None, output_dim=None, task="auto", lr=None,
                  epochs=60, batch_size=64, weight_decay=0.0, normalize=True,
-                 patience=None, device=None, seed=None, verbose=False):
+                 patience=None, device=None, seed=None, verbose=False,
+                 optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None):
         if task not in ("auto", "classification", "regression"):
             raise ValueError("task must be 'auto', 'classification' or 'regression'")
         self.input_dim, self.output_dim, self.task = input_dim, output_dim, task
         self.lr, self.epochs, self.batch_size = lr, epochs, batch_size
         self.weight_decay, self.normalize = weight_decay, normalize
         self.patience, self.verbose = patience, verbose
+        self.optimizer, self.optimizer_kwargs = optimizer, dict(optimizer_kwargs or {})
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
+        self._declared_classes = None if classes is None else np.unique(classes)
+        self.strategies = list(strategies or [])  # continual-learning / distillation plug-ins
         self._module = None
         self.classes_ = None
         self._mu = self._sd = None
@@ -92,7 +98,7 @@ class BaseModel:
         if self.input_dim not in (None, d_in):
             raise ValueError(f"input_dim={self.input_dim} but X has {d_in} features")
         if self.task == "classification":
-            self.classes_ = np.unique(y)
+            self.classes_ = self._declared_classes if self._declared_classes is not None else np.unique(y)
             d_out = len(self.classes_)
         else:
             d_out = 1 if y.ndim == 1 else y.shape[1]
@@ -138,9 +144,44 @@ class BaseModel:
         self._fit(Xt, yt, epochs or self.epochs, val)
         return self
 
+    def _train_batch(self, m, opt, xb, yb):
+        """One optimisation step; returns the batch loss as a float.
+        Override for learning rules that do not use ordinary backpropagation."""
+        for s in self.strategies:  # e.g. replay adds stored samples to the batch
+            xb, yb = s.before_batch(xb, yb)
+
+        def closure():
+            opt.zero_grad()
+            loss = self._loss(m(xb), yb)
+            aux = getattr(m, "aux_loss", None)  # e.g. MoE load balancing
+            if aux is not None:
+                loss = loss + aux
+            for s in self.strategies:  # e.g. EWC / LwF / distillation penalties
+                loss = loss + s.penalty(self, m, xb)
+            loss.backward()
+            return loss
+        if isinstance(opt, torch.optim.LBFGS):
+            return opt.step(closure).item()
+        loss = closure()
+        opt.step()
+        return loss.item()
+
+    def partial_fit(self, X, y):
+        """One epoch on new data (online / incremental learning)."""
+        return self.fit(X, y, epochs=1)
+
+    def learn_task(self, X, y, epochs=None):
+        """Train on one task, then let strategies consolidate (EWC Fisher, LwF snapshot, replay buffer)."""
+        self.fit(X, y, epochs=epochs)
+        Xt, yt = self._norm(self._as_x(X)), self._encode(y)
+        for s in self.strategies:
+            s.after_task(self, Xt, yt)
+        return self
+
     def _fit(self, Xt, yt, epochs, val):
         m = self._module
-        opt = torch.optim.Adam(m.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        opt = make_optimizer(self.optimizer, m.parameters(), self.lr, self.weight_decay,
+                             **self.optimizer_kwargs)
         n, best, wait, best_state = len(Xt), float("inf"), 0, None
         for ep in range(epochs):
             m.train()
@@ -150,14 +191,8 @@ class BaseModel:
                 idx = perm[i:i + self.batch_size]
                 if len(idx) < 2 and n > 1:  # BatchNorm needs >1 sample
                     continue
-                opt.zero_grad()
-                loss = self._loss(m(Xt[idx]), yt[idx])
-                aux = getattr(m, "aux_loss", None)  # e.g. MoE load balancing
-                if aux is not None:
-                    loss = loss + aux
-                loss.backward()
-                opt.step()
-                total += loss.item() * len(idx)
+                loss = self._train_batch(m, opt, Xt[idx], yt[idx])
+                total += loss * len(idx)
             self.history_["loss"].append(total / n)
             if val is not None:
                 with torch.no_grad():
@@ -217,8 +252,10 @@ class BaseModel:
     # ---- persistence ---------------------------------------------------------
     def save(self, path):
         self._check_fitted()
+        args, kwargs = self._init_args
+        kwargs = {k: v for k, v in kwargs.items() if k != "strategies"}
         torch.save({
-            "cls": type(self).__name__, "init_args": self._init_args,
+            "cls": type(self).__name__, "init_args": (args, kwargs),
             "state": self._module.state_dict(), "task": self.task,
             "dims": (self.input_dim, self.output_dim), "classes": self.classes_,
             "norm": (self._mu, self._sd),

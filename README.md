@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.1, early development.** Only the vector/tabular family is implemented (see below). The API may change.
+> **Status: v0.3, early development.** Implemented: vector/tabular networks, unsupervised and self-supervised models, Hebbian-style rules, continual-learning strategies, and tabular RL and bandits. Sequence, image and graph families are not built yet. The API may change.
 
 ## Why
 
@@ -66,6 +66,79 @@ model.module            # plain torch.nn.Module
 
 Shared training options (all models): `lr`, `epochs`, `batch_size`, `weight_decay`, `normalize`, `patience`, `device`, `seed`, `verbose`.
 
+## More families (v0.3)
+
+### Unsupervised and self-supervised
+
+`fit(X)` takes no labels; `transform(X)` returns the learned representation.
+
+| Registry name | Class | Notes |
+|---|---|---|
+| `autoencoder` | `Autoencoder` | Also `reconstruct(X)`. |
+| `denoising_ae` | `DenoisingAutoencoder` | Reconstructs clean input from noisy input. |
+| `vae` | `VAE` | Variational autoencoder; also `sample(n)`. |
+| `masked` | `MaskedPrediction` | Hide random features and predict them. |
+| `contrastive` | `Contrastive` | SimCLR-style, InfoNCE (NT-Xent) objective. |
+| `byol` | `BYOL` | Bootstrap latent learning, no negative pairs. |
+| `deep_clustering` | `DeepClustering` | Autoencoder + k-means + DEC refinement; `predict(X)` gives cluster ids. |
+| `hebbian` | `HebbianLearner` | Local rules, no gradients: `hebbian`, `oja`, `sanger`, `bcm`, `competitive`. |
+
+```python
+enc = sc.Contrastive(latent_dim=8, epochs=100).fit(X)
+Z = enc.transform(X)
+
+pca_like = sc.HebbianLearner(rule="sanger", n_components=2).fit(X)
+```
+
+Augmentations for the contrastive models are Gaussian noise plus feature dropout, which suits tabular data.
+
+### Continual learning, replay, distillation, active learning
+
+Strategies plug into any supervised model. For class-incremental learning, declare every class up front with `classes=`.
+
+```python
+model = sc.MLP(classes=[0, 1, 2, 3], strategies=[sc.Replay(capacity=200)])
+model.learn_task(X_task1, y_task1)
+model.learn_task(X_task2, y_task2)       # task 1 is not forgotten
+
+student = sc.distill(teacher, sc.MLP(hidden=(8,)), X)       # knowledge distillation
+idx = sc.query(model, X_pool, n=20, strategy="entropy")     # active learning: what to label next
+model.partial_fit(X_new, y_new)                             # one epoch of online learning
+```
+
+Available: `Replay` (optionally `prioritized=True`), `EWC`, `LwF`, `distill`, `query` (`entropy`, `margin`, `least_confident`, `random`).
+`examples/continual_learning.py` compares them. On the toy task, replay keeps task 1 at about 0.97 accuracy, EWC at about 0.66, and no strategy at about 0.43. LwF barely helps in this class-incremental setting, which is a known weakness of the method.
+
+### Reinforcement learning and bandits
+
+These use an environment (`reset()`, `step(a)`) instead of `fit(X, y)`.
+
+```python
+env = sc.GridWorld(size=4)
+agent = sc.QLearning(alpha=0.2, epsilon=0.5, seed=0)
+agent.train(env, episodes=800)
+print(agent.evaluate(env))
+
+bandit = sc.UCB1(n_arms=4)
+rewards = sc.run_bandit(bandit, sc.BernoulliBandit([0.1, 0.2, 0.8, 0.3]), steps=2000)
+```
+
+Agents: `QLearning`, `SARSA`, `ExpectedSARSA`, `MonteCarloControl` (tabular, integer states). Bandits: `EpsilonGreedyBandit`, `UCB1`, `ThompsonBandit`, `LinUCB` (contextual). `PotentialShaping` wraps an environment with policy-preserving reward shaping.
+
+## Optimizers
+
+Any model can be trained with any of these, with `optimizer="..."`:
+
+`sgd`, `momentum`, `nesterov`, `adagrad`, `rmsprop`, `adadelta`, `adam` (default), `adamw`, `adamax`, `amsgrad`, `radam`, `adafactor`, `lamb`, `lion`, `lbfgs`
+
+```python
+model = sc.MLP(optimizer="lion", lr=3e-4)
+model = sc.MLP(optimizer="sgd", optimizer_kwargs={"momentum": 0.9})
+model = sc.MLP(optimizer="lbfgs", batch_size=len(X_train))   # full-batch works best
+```
+
+If `lr` is not given, each optimizer uses its own starting learning rate (`saturncube.optim.DEFAULT_LR`). Most are the `torch.optim` implementations; Lion and LAMB are implemented here.
+
 ## Models (vector / tabular family)
 
 Input is a 2-D array of shape `(n_samples, n_features)`.
@@ -87,10 +160,14 @@ Input is a 2-D array of shape `(n_samples, n_features)`.
 | `rbf` | `RBF` | Radial basis function network; centers initialized from data. |
 | `elm` | `ExtremeLearningMachine` | Random frozen hidden layer; readout solved in closed form (no epochs). |
 | `random_nn` | `RandomNeuralNetwork` | Gelenbe random neural network with a linear readout. |
+| `fa` | `FeedbackAlignment` | MLP trained with Feedback Alignment (fixed random backward weights). |
+| `dfa` | `DirectFeedbackAlignment` | MLP trained with Direct Feedback Alignment (output error sent straight to each hidden layer). |
 
 List what is available with `sc.available()`, and build by name with `sc.create("kan", hidden=(16,))`.
 
 ## Example results
+
+`examples/compare_optimizers.py` trains the same MLP with each optimizer, plus `fa` and `dfa`, on the same synthetic task. Results vary a lot with learning rate and seed, so treat it as a smoke test, not a ranking.
 
 `examples/compare_all.py` runs every model with default settings on a synthetic 3-class nonlinear problem (1000 samples, 8 features, seed 0):
 
@@ -141,6 +218,10 @@ The test suite trains every model on classification and regression, and checks s
 
 ## Roadmap
 
+- Deep RL (DQN family, REINFORCE, actor-critic, PPO, TRPO, SAC), model-based RL, inverse RL, preference learning
+- Meta-learning (MAML, Reptile), few-shot and transfer learning, curriculum and self-paced learning, generative replay
+- Three-factor rules, STDP and predictive coding (these need the spiking and recurrent families)
+- Remaining optimizers (conjugate gradient, coordinate descent, natural gradient, K-FAC, Shampoo)
 - sklearn wrappers (random forest, logistic regression) in the same interface
 - Sequence models (RNN, LSTM, GRU, state-space models) and attention layers
 - Metric-learning models, then graph and spiking networks as optional extras

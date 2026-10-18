@@ -10,11 +10,11 @@ y_reg = (np.sin(X[:, 0]) + X[:, 1] * X[:, 2]).astype(np.float32)
 Xtr, Xte, ctr, cte, rtr, rte = X[:450], X[450:], y_cls[:450], y_cls[450:], y_reg[:450], y_reg[450:]
 NAMES = sc.available("vector")
 # local / random-feature models are weaker on this XOR-like 8-d task; chance is ~0.4
-MIN_ACC = {"elm": 0.55, "rbf": 0.6}
+MIN_ACC = {"elm": 0.55, "rbf": 0.6, "fa": 0.55, "dfa": 0.55}
 
 
-def test_all_fifteen_registered():
-    assert len(NAMES) == 15
+def test_registry_contents():
+    assert len(NAMES) == 17 and {"fa", "dfa"} <= set(NAMES)
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -47,3 +47,20 @@ def test_save_load(name, tmp_path):
 def test_escape_hatch_and_explicit_dims():
     m = sc.MLP(input_dim=8, output_dim=3, hidden=(16,)).fit(Xtr, ctr, epochs=1)
     assert hasattr(m.module, "parameters")
+
+
+# ---- v0.2: optimizers and alternative learning rules ---------------------------
+from saturncube.optim import OPTIMIZERS
+
+
+@pytest.mark.parametrize("opt", OPTIMIZERS)
+def test_optimizers_train_an_mlp(opt):
+    kw = {"batch_size": 450, "epochs": 30} if opt == "lbfgs" else {}
+    m = sc.MLP(optimizer=opt, seed=0, **kw).fit(Xtr, ctr)
+    assert m.history_["loss"][-1] < m.history_["loss"][0]
+    assert m.evaluate(Xte, cte)["accuracy"] > 0.6, opt
+
+
+def test_unknown_optimizer():
+    with pytest.raises(ValueError):
+        sc.MLP(optimizer="nope").fit(Xtr, ctr, epochs=1)
