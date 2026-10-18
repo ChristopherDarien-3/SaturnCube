@@ -1,0 +1,13 @@
+[project]
+name = "saturncube"
+version = "0.1.0"
+description = "One fit/predict/evaluate interface across many model families"
+requires-python = ">=3.9"
+dependencies = ["torch", "numpy"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["saturncube"]
