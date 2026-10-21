@@ -248,3 +248,160 @@ def run_bandit(bandit, env, steps=1000):
         rewards[t] = env.pull(arm)
         bandit.update(arm, rewards[t])
     return rewards
+
+
+# ======================================================== environments for deep RL ===
+class OneHotObs:
+    """Present an integer-state environment (e.g. GridWorld) as one-hot float vectors."""
+
+    def __init__(self, env):
+        self.env, self.obs_dim, self.n_actions = env, env.n_states, env.n_actions
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+    def _oh(self, s):
+        v = np.zeros(self.obs_dim, dtype=np.float32)
+        v[s] = 1.0
+        return v
+
+    def reset(self):
+        return self._oh(self.env.reset())
+
+    def step(self, a):
+        s, r, d = self.env.step(a)
+        return self._oh(s), r, d
+
+
+class PointMass:
+    """Continuous control: push a point mass at x to the origin. obs = (x, v), action in [-1, 1].
+    Reward = -x^2 - 0.01 a^2 per step."""
+    obs_dim, action_dim, action_high = 2, 1, 1.0
+
+    def __init__(self, max_steps=30, seed=None):
+        self.max_steps, self.rng = max_steps, np.random.default_rng(seed)
+
+    def reset(self):
+        self.x, self.v, self.t = self.rng.uniform(-2, 2), 0.0, 0
+        return np.array([self.x, self.v], dtype=np.float32)
+
+    def step(self, a):
+        a = float(np.clip(np.asarray(a).reshape(-1)[0], -1, 1))
+        self.v = float(np.clip(0.95 * self.v + 0.3 * a, -2, 2))
+        self.x += 0.3 * self.v
+        self.t += 1
+        return np.array([self.x, self.v], dtype=np.float32), -(self.x ** 2) - 0.01 * a ** 2, self.t >= self.max_steps
+
+
+def _transitions(self):
+    """Deterministic transition tensor P[s, a, s'] with the goal state absorbing."""
+    S, A = self.n_states, self.n_actions
+    P = np.zeros((S, A, S))
+    for s in range(S):
+        r0, c0 = divmod(s, self.size)
+        for a, (dr, dc) in enumerate([(-1, 0), (1, 0), (0, -1), (0, 1)]):
+            if s == S - 1:
+                P[s, a, s] = 1.0
+                continue
+            r, c = min(max(r0 + dr, 0), self.size - 1), min(max(c0 + dc, 0), self.size - 1)
+            P[s, a, r * self.size + c] = 1.0
+    return P
+
+
+GridWorld.transitions = _transitions
+
+
+# =========================================================== more tabular agents ===
+@register("sarsa_lambda", family="agent")
+class SARSALambda(TabularAgent):
+    """SARSA(lambda) with accumulating eligibility traces."""
+
+    def __init__(self, lam=0.8, **kw):
+        super().__init__(**kw)
+        self.lam = lam
+
+    def _episode(self, env):
+        s, done, G, E = env.reset(), False, 0.0, np.zeros_like(self.Q)
+        a = self.act(s)
+        while not done:
+            s2, r, done = env.step(a)
+            a2 = self.act(s2)
+            delta = r + (0.0 if done else self.gamma * self.Q[s2, a2]) - self.Q[s, a]
+            E[s, a] += 1.0
+            self.Q += self.alpha * delta * E
+            E *= self.gamma * self.lam
+            s, a, G = s2, a2, G + r
+        return G
+
+
+@register("dyna_q", family="agent")
+class DynaQ(TabularAgent):
+    """Dyna-Q: Q-learning plus `planning_steps` simulated updates per real step, replayed from
+    a learned model of the environment (model-based RL, tabular)."""
+
+    def __init__(self, planning_steps=10, **kw):
+        super().__init__(**kw)
+        self.planning_steps, self.model = planning_steps, {}
+
+    def _update(self, s, a, r, s2, done):
+        self.Q[s, a] += self.alpha * (r + (0.0 if done else self.gamma * self.Q[s2].max()) - self.Q[s, a])
+
+    def _episode(self, env):
+        s, done, G = env.reset(), False, 0.0
+        while not done:
+            a = self.act(s)
+            s2, r, done = env.step(a)
+            self._update(s, a, r, s2, done)
+            self.model[(s, a)] = (r, s2, done)
+            keys = list(self.model)
+            for i in self.rng.integers(len(keys), size=self.planning_steps):
+                ps, pa = keys[i]
+                pr, ps2, pd = self.model[(ps, pa)]
+                self._update(ps, pa, pr, ps2, pd)
+            s, G = s2, G + r
+        return G
+
+
+# ================================================================ inverse RL (tabular) ===
+class MaxEntIRL:
+    """Maximum-entropy inverse RL (Ziebart et al., 2008) with a per-state reward: finds the
+    reward under which the expert's state-visitation frequencies are most likely. Needs the
+    environment's transition tensor (env.transitions()) and expert state trajectories."""
+
+    def __init__(self, gamma=0.95, horizon=20, lr=0.2, iterations=300, l2=1e-3):
+        self.gamma, self.horizon, self.lr, self.iterations, self.l2 = gamma, horizon, lr, iterations, l2
+
+    def fit(self, env, demos, start_state=0):
+        P = env.transitions()
+        S, A, _ = P.shape
+        T = self.horizon
+        mu_expert = np.zeros(S)
+        for traj in demos:  # pad with the final (absorbing) state to a fixed horizon
+            traj = list(traj)[:T] + [traj[-1]] * max(0, T - len(traj))
+            for s in traj:
+                mu_expert[s] += 1.0 / len(demos)
+        theta = np.zeros(S)
+        for _ in range(self.iterations):
+            V = np.zeros(S)
+            for _ in range(T):  # soft value iteration
+                Q = theta[:, None] + self.gamma * (P @ V)
+                V = np.log(np.exp(Q - Q.max(1, keepdims=True)).sum(1)) + Q.max(1)
+            pi = np.exp(Q - V[:, None])
+            D, svf = np.zeros(S), np.zeros(S)
+            D[start_state] = 1.0
+            for _ in range(T):  # expected state visitation under the soft-optimal policy
+                svf += D
+                D = np.einsum("s,sa,sat->t", D, pi, P)
+            theta += self.lr * (mu_expert - svf - self.l2 * theta)
+        self.reward_, self.policy_, self.Q_ = theta, Q.argmax(1), Q
+        return self
+
+    def evaluate(self, env, episodes=5):
+        """Mean true return of the policy that is optimal for the recovered reward."""
+        total = 0.0
+        for _ in range(episodes):
+            s, done = env.reset(), False
+            while not done:
+                s, r, done = env.step(int(self.policy_[s]))
+                total += r
+        return total / episodes

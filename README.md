@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.3, early development.** Implemented: vector/tabular networks, unsupervised and self-supervised models, Hebbian-style rules, continual-learning strategies, and tabular RL and bandits. Sequence, image and graph families are not built yet. The API may change.
+> **Status: v0.4, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL. **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
 
 ## Why
 
@@ -125,6 +125,25 @@ rewards = sc.run_bandit(bandit, sc.BernoulliBandit([0.1, 0.2, 0.8, 0.3]), steps=
 
 Agents: `QLearning`, `SARSA`, `ExpectedSARSA`, `MonteCarloControl` (tabular, integer states). Bandits: `EpsilonGreedyBandit`, `UCB1`, `ThompsonBandit`, `LinUCB` (contextual). `PotentialShaping` wraps an environment with policy-preserving reward shaping.
 
+## v0.4 families (overview)
+
+Every model below uses the same `create(name)` / `fit` / `predict` / `evaluate` pattern unless noted. `sc.available(family)` lists names.
+
+| Family | Models (registry names) |
+|---|---|
+| Learning rules (vector) | `forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`, plus `fa`, `dfa` |
+| Sequence (X is `(n, T, d)` or integer tokens with `vocab_size=`) | `rnn`, `elman`, `jordan`, `lstm`, `gru`, `birnn`, `bilstm`, `bigru`, `ctrnn`, `neural_ssm`, `s4`, `mamba`, `plastic_rnn`, `esn`, `lsm`, `rtrl_rnn`; truncated BPTT via `tbptt=k`; next-token prediction via `fit(tokens)` |
+| Attention | `transformer_encoder`, `transformer_decoder`, `linear_attention`, `local_attention`, `sparse_attention`, `multi_query`, `grouped_query`, `universal_transformer`, `memory_transformer`, `perceiver`, `ssm_attention_hybrid`, `recurrent_attention`, `retrieval_augmented`, `encoder_decoder`; layers `MultiHeadAttention` (MHA/MQA/GQA, cross-attention), `LinearAttention`, `TransformerLayer` |
+| Memory | `hopfield`, `modern_hopfield`, `associative_memory`, `content_addressable_memory`, `product_key_memory`, `memory_network`, `kv_memory_network`, `ntm`, `dnc` |
+| Metric / few-shot | `siamese`, `triplet`, `twin_tower`, `contrastive_embedding`, `prototypical`, `relation`, `matching` (few-shot: `predict(X, support=(Xs, ys))` on unseen classes) |
+| Graph / tree / pointer | `gcn`, `gat`, `graphsage`, `gin`, `mpnn`, `rgcn`, `graph_transformer`, `ggnn`, `graph_net_recurrent`, `hypergraph`, `program_graph`, `tree_lstm`, `tree_nn`, `pointer_network`, `pointer_generator` (graphs: `sc.Graph`, `sc.Tree`) |
+| Unsupervised (added) | `temporal_contrastive`, `latent_prediction`, `energy_based` |
+| Deep RL (`train(env)`) | `dqn`, `double_dqn`, `dueling_dqn`, `prioritized_dqn`, `reinforce`, `actor_critic`, `a2c`, `ppo`, `trpo`, `sac`, `model_based_mpc`; `MaxEntIRL`, `PreferenceRewardModel` + `LearnedRewardEnv`; tabular `sarsa_lambda`, `dyna_q` |
+| Meta / transfer | `MAML`, `Reptile` (with `SineTasks`, `GaussianTasks`), `transfer`, `fit_curriculum`, `fit_self_paced`, `GenerativeReplay` |
+| Optimizers (added) | `cg`, `coordinate_descent`, `shampoo`, `kfac`, `natural_gradient` |
+
+Notes: the alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) are research-style methods. They learn the easy blob task in `tests/test_rules.py` but are not reliable with default settings on harder problems such as XOR-like data; expect to tune them. Environments need `obs_dim` and either `n_actions` or `action_dim`/`action_high` (see `sc.OneHotObs`, `sc.PointMass`). `ModelBasedMPC` on one-hot discrete observations needs `project=` to keep predicted states valid. Graphs use dense adjacency, so they suit up to a few thousand nodes in total.
+
 ## Optimizers
 
 Any model can be trained with any of these, with `optimizer="..."`:
@@ -226,4 +245,6 @@ The test suite trains every model on classification and regression, and checks s
 - Sequence models (RNN, LSTM, GRU, state-space models) and attention layers
 - Metric-learning models, then graph and spiking networks as optional extras
 
+## License
 
+Add a license before publishing (for example MIT).

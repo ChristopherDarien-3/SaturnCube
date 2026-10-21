@@ -27,12 +27,13 @@ class Unsupervised(BaseModel):
 
     def _init(self, X, y=None):
         self.task = "unsupervised"
-        d_in = X.shape[1]
+        d_in = X.shape[-1]
         if self.input_dim not in (None, d_in):
             raise ValueError(f"input_dim={self.input_dim} but X has {d_in} features")
         self.input_dim, self.output_dim = d_in, self.latent_dim
         if self.normalize:
-            self._mu, self._sd = X.mean(0), X.std(0)
+            axes = tuple(range(X.ndim - 1))
+            self._mu, self._sd = X.mean(axes), X.std(axes)
             self._sd[self._sd < 1e-8] = 1.0
         self._module = self.build(d_in, self.latent_dim).to(self.device)
         if hasattr(self._module, "init_from_data"):
@@ -438,3 +439,134 @@ class HebbianLearner(Unsupervised):
             for i in range(0, n, self.batch_size):
                 m.update(Xt[perm[i:i + self.batch_size]], self.lr)
             self.history_["loss"].append(float(m.loss(Xt)))
+
+
+# ================================================ predictive / energy-based learning ===
+class TemporalNet(nn.Module):
+    """Contrastive predictive coding for sequences: the embedding of the past must identify
+    (among the other sequences in the batch) the embedding of that sequence's future."""
+
+    def __init__(self, d_in, latent, hidden=32, horizon=4, temperature=0.2):
+        super().__init__()
+        self.past, self.future = nn.GRU(d_in, hidden, batch_first=True), nn.GRU(d_in, hidden, batch_first=True)
+        self.past_out, self.future_out = nn.Linear(hidden, latent), nn.Linear(hidden, latent)
+        self.pred, self.horizon, self.t = nn.Linear(latent, latent), horizon, temperature
+
+    def encode(self, x):
+        return self.past_out(self.past(x)[1][-1])
+
+    forward = encode
+
+    def loss(self, x):
+        k = self.horizon
+        zc = F.normalize(self.pred(self.encode(x[:, :-k])), dim=-1)
+        zf = F.normalize(self.future_out(self.future(x[:, -k:])[1][-1]), dim=-1)
+        logits = zc @ zf.T / self.t
+        return F.cross_entropy(logits, torch.arange(len(x), device=x.device))
+
+
+@register("temporal_contrastive", family="unsupervised")
+class TemporalContrastive(Unsupervised):
+    """Temporal contrastive / predictive representation learning on sequences (n, T, d)."""
+    def __init__(self, horizon=4, temperature=0.2, **kw):
+        super().__init__(**kw)
+        self.horizon, self.temperature = horizon, temperature
+
+    def build(self, d_in, d_out):
+        return TemporalNet(d_in, d_out, self.hidden[0], self.horizon, self.temperature)
+
+
+class JEPANet(nn.Module):
+    """Latent prediction (JEPA-style): predict the *embedding* of the full input, produced by
+    a slowly moving target encoder, from an embedding of a masked view; nothing is reconstructed."""
+
+    def __init__(self, d_in, latent, hidden=(64,), mask_ratio=0.4, tau=0.99, activation="relu"):
+        super().__init__()
+        self.enc = L.MLPNet(2 * d_in, latent, hidden, activation)
+        self.pred = L.MLPNet(latent, latent, (latent,), activation)
+        self.target = copy.deepcopy(self.enc)
+        for p in self.target.parameters():
+            p.requires_grad_(False)
+        self.mask_ratio, self.tau = mask_ratio, tau
+
+    def forward(self, x):
+        return self.enc(torch.cat([x, torch.zeros_like(x)], dim=1))
+
+    def loss(self, x):
+        mask = (torch.rand_like(x) < self.mask_ratio).float()
+        p = F.normalize(self.pred(self.enc(torch.cat([x * (1 - mask), mask], dim=1))), dim=1)
+        with torch.no_grad():
+            t = F.normalize(self.target(torch.cat([x, torch.zeros_like(x)], dim=1)), dim=1)
+        return (2 - 2 * (p * t).sum(1)).mean()
+
+    @torch.no_grad()
+    def after_step(self):
+        for po, pt in zip(self.enc.parameters(), self.target.parameters()):
+            pt.mul_(self.tau).add_(po.detach(), alpha=1 - self.tau)
+
+
+@register("latent_prediction", family="unsupervised")
+class LatentPrediction(Unsupervised):
+    def __init__(self, mask_ratio=0.4, tau=0.99, **kw):
+        super().__init__(**kw)
+        self.mask_ratio, self.tau = mask_ratio, tau
+
+    def build(self, d_in, d_out):
+        return JEPANet(d_in, d_out, self.hidden, self.mask_ratio, self.tau, self.activation)
+
+
+class EBMNet(nn.Module):
+    """Scalar energy E(x). Trained by contrastive divergence: data energy is pushed down and
+    the energy of Langevin-sampled negatives (persistent buffer) is pushed up."""
+
+    def __init__(self, d_in, hidden=(64, 64), steps=20, step_size=0.1, noise=0.02, buffer_size=512, reg=0.1):
+        super().__init__()
+        self.f = L.MLPNet(d_in, 1, hidden, "silu")
+        self.register_buffer("buffer", torch.randn(buffer_size, d_in))
+        self.steps, self.step_size, self.noise, self.reg = steps, step_size, noise, reg
+
+    def forward(self, x):
+        return self.f(x).squeeze(-1)
+
+    def langevin(self, x, steps=None):
+        x = x.detach().clone()
+        for _ in range(steps or self.steps):
+            x.requires_grad_(True)
+            with torch.enable_grad():
+                g, = torch.autograd.grad(self(x).sum(), x)
+            x = (x - self.step_size * g + self.noise * torch.randn_like(x)).clamp(-6, 6).detach()
+        return x
+
+    def loss(self, x):
+        idx = torch.randint(len(self.buffer), (len(x),), device=x.device)
+        start = self.buffer[idx]
+        fresh = torch.rand(len(x), device=x.device) < 0.05
+        start = torch.where(fresh[:, None], torch.randn_like(start), start)
+        was_training = self.training
+        self.eval()
+        neg = self.langevin(start)
+        self.train(was_training)
+        self.buffer[idx] = neg
+        e_pos, e_neg = self(x), self(neg)
+        return e_pos.mean() - e_neg.mean() + self.reg * (e_pos ** 2 + e_neg ** 2).mean()
+
+
+@register("energy_based", family="unsupervised")
+class EnergyBasedModel(Unsupervised):
+    """Energy-based model of the data distribution. transform(X) returns the energy of each
+    sample (low = likely); sample(n) draws samples by Langevin dynamics."""
+    def __init__(self, hidden=(64, 64), langevin_steps=20, step_size=0.1, noise=0.02, **kw):
+        super().__init__(hidden=hidden, **kw)
+        self.langevin_steps, self.step_size, self.noise = langevin_steps, step_size, noise
+
+    def build(self, d_in, d_out):
+        return EBMNet(d_in, self.hidden, self.langevin_steps, self.step_size, self.noise)
+
+    def energy(self, X):
+        return self.transform(X)
+
+    def sample(self, n=64, steps=100):
+        self._check_fitted()
+        self._module.eval()
+        x0 = torch.randn(n, self.input_dim, device=self.device)
+        return self._denorm(self._module.langevin(x0, steps))

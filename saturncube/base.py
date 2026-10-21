@@ -94,20 +94,20 @@ class BaseModel:
         if self.task == "auto":
             # integer / bool / string labels -> classification, floats -> regression
             self.task = "classification" if y.dtype.kind in "biuOUS" else "regression"
-        d_in = X.shape[1]
+        d_in = X.shape[-1]
         if self.input_dim not in (None, d_in):
             raise ValueError(f"input_dim={self.input_dim} but X has {d_in} features")
         if self.task == "classification":
             self.classes_ = self._declared_classes if self._declared_classes is not None else np.unique(y)
             d_out = len(self.classes_)
         else:
-            d_out = 1 if y.ndim == 1 else y.shape[1]
+            d_out = 1 if y.ndim == 1 else y.shape[-1]
         if self.output_dim not in (None, d_out):
             raise ValueError(f"output_dim={self.output_dim} but data implies {d_out}")
         self.input_dim, self.output_dim = d_in, d_out
         if self.normalize:
-            self._mu = X.mean(0)
-            self._sd = X.std(0)
+            axes = tuple(range(X.ndim - 1))  # per-feature statistics (also for 3-D sequences)
+            self._mu, self._sd = X.mean(axes), X.std(axes)
             self._sd[self._sd < 1e-8] = 1.0
         self._module = self.build(d_in, d_out).to(self.device)
         if hasattr(self._module, "init_from_data"):
@@ -125,10 +125,13 @@ class BaseModel:
             if not np.all(self.classes_[idx] == y):
                 raise ValueError("y contains labels not seen when the model was first fitted")
             return torch.from_numpy(idx).long().to(self.device)
-        return torch.from_numpy(y.astype(np.float32).reshape(len(y), -1)).to(self.device)
+        y = y.astype(np.float32)
+        return torch.from_numpy(y.reshape(len(y), -1) if y.ndim <= 2 else y).to(self.device)
 
     def _loss(self, out, y):
         if self.task == "classification":
+            if out.dim() == 3:  # per-step outputs of sequence models
+                out, y = out.reshape(-1, out.shape[-1]), y.reshape(-1)
             return F.cross_entropy(out, y)
         return F.mse_loss(out, y)
 
@@ -144,11 +147,21 @@ class BaseModel:
         self._fit(Xt, yt, epochs or self.epochs, val)
         return self
 
+    def prepare(self, input_dim, output_dim, task="regression", classes=None):
+        """Build the network without data (needed by meta-learners and transfer learning)."""
+        self.task, self.input_dim, self.output_dim, self.normalize = task, input_dim, output_dim, False
+        if task == "classification":
+            self.classes_ = np.arange(output_dim) if classes is None else np.asarray(classes)
+        self._module = self.build(input_dim, output_dim).to(self.device)
+        return self
+
     def _train_batch(self, m, opt, xb, yb):
         """One optimisation step; returns the batch loss as a float.
         Override for learning rules that do not use ordinary backpropagation."""
         for s in self.strategies:  # e.g. replay adds stored samples to the batch
             xb, yb = s.before_batch(xb, yb)
+        if getattr(opt, "needs_per_sample", False):  # natural gradient
+            return opt.step_per_sample(self, m, xb, yb)
 
         def closure():
             opt.zero_grad()
@@ -160,7 +173,7 @@ class BaseModel:
                 loss = loss + s.penalty(self, m, xb)
             loss.backward()
             return loss
-        if isinstance(opt, torch.optim.LBFGS):
+        if isinstance(opt, torch.optim.LBFGS) or getattr(opt, "uses_closure", False):
             return opt.step(closure).item()
         loss = closure()
         opt.step()
@@ -181,7 +194,7 @@ class BaseModel:
     def _fit(self, Xt, yt, epochs, val):
         m = self._module
         opt = make_optimizer(self.optimizer, m.parameters(), self.lr, self.weight_decay,
-                             **self.optimizer_kwargs)
+                             module=m, **self.optimizer_kwargs)
         n, best, wait, best_state = len(Xt), float("inf"), 0, None
         for ep in range(epochs):
             m.train()
@@ -228,15 +241,15 @@ class BaseModel:
         self._check_fitted()
         if self.task != "classification":
             raise ValueError("predict_proba is only defined for classification")
-        return F.softmax(self._outputs(self._norm(self._as_x(X))), dim=1).cpu().numpy()
+        return F.softmax(self._outputs(self._norm(self._as_x(X))), dim=-1).cpu().numpy()
 
     def predict(self, X):
         self._check_fitted()
         out = self._outputs(self._norm(self._as_x(X)))
         if self.task == "classification":
-            return self.classes_[out.argmax(1).cpu().numpy()]
+            return self.classes_[out.argmax(-1).cpu().numpy()]
         out = out.cpu().numpy()
-        return out[:, 0] if out.shape[1] == 1 else out
+        return out[..., 0] if out.shape[-1] == 1 else out
 
     def evaluate(self, X, y):
         self._check_fitted()
@@ -244,9 +257,9 @@ class BaseModel:
         out = self._outputs(Xt)
         loss = self._loss(out, yt).item()
         if self.task == "classification":
-            return {"loss": loss, "accuracy": (out.argmax(1) == yt).float().mean().item()}
+            return {"loss": loss, "accuracy": (out.argmax(-1) == yt).float().mean().item()}
         mse = F.mse_loss(out, yt).item()
-        var = yt.var(0, unbiased=False).mean().item()
+        var = yt.reshape(-1, yt.shape[-1]).var(0, unbiased=False).mean().item()
         return {"loss": loss, "mse": mse, "rmse": mse ** 0.5, "r2": 1 - mse / max(var, 1e-12)}
 
     # ---- persistence ---------------------------------------------------------
