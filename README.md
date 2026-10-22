@@ -276,6 +276,3 @@ The test suite trains every model on classification and regression, and checks s
 - Sequence models (RNN, LSTM, GRU, state-space models) and attention layers
 - Metric-learning models, then graph and spiking networks as optional extras
 
-## License
-
-Add a license before publishing (for example MIT).
