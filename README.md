@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.4, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL. **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
+> **Status: v0.5, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL. plus three techniques from each of the search, symbolic, memory, cognition, verification, code-generation, experiment-design and classical-ML wheels (below). **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
 
 ## Why
 
@@ -143,6 +143,37 @@ Every model below uses the same `create(name)` / `fit` / `predict` / `evaluate` 
 | Optimizers (added) | `cg`, `coordinate_descent`, `shampoo`, `kfac`, `natural_gradient` |
 
 Notes: the alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) are research-style methods. They learn the easy blob task in `tests/test_rules.py` but are not reliable with default settings on harder problems such as XOR-like data; expect to tune them. Environments need `obs_dim` and either `n_actions` or `action_dim`/`action_high` (see `sc.OneHotObs`, `sc.PointMass`). `ModelBasedMPC` on one-hot discrete observations needs `project=` to keep predicted states valid. Graphs use dense adjacency, so they suit up to a few thousand nodes in total.
+
+## Wheels C-J (v0.5): tools around the models
+
+Three commonly used techniques for each wheel of the project plan. They are plain Python classes
+(not `fit(X, y)` models) and fit together; `examples/c_programmer_pipeline.py` wires several of them into one loop.
+
+| Wheel | Techniques |
+|---|---|
+| C. Search | `GeneticAlgorithm` (typed genes), `SuccessiveHalving` (+ `RandomSearch` baseline), `SimulatedAnnealing` |
+| D. Symbolic | `parse` / `run_c` / `to_c`: recursive-descent parser, AST and safe step-limited interpreter for a small C subset; `EnumerativeSynthesizer` (programs from examples); `Datalog` forward chaining (+ `program_facts` for call-graph analysis) |
+| E. Memory | `BM25Index`, `VectorStore` (cosine k-NN, optional LSH) with `HashingEmbedder`, `CaseLibrary` (case-based memory with forgetting and consolidation) |
+| F. Cognition | `SM2Scheduler` (spaced repetition), `InterleavedPractice`, `RevisionLoop` (predict-act-observe-revise) with `MetacognitiveMonitor` (calibration, abstention) |
+| G. Verification | `Sandbox` (gcc compile + resource-limited run), `UnitTests` (interpreter or gcc), `check_property` / `differential_test` with shrinking |
+| H. Generation | `GrammarGenerator` (+ `C_GRAMMAR`, optional guidance), `TemplateFiller` (sketch synthesis), `BPETokenizer` |
+| I. Experiment design | `RandomArchitectureGenerator` (typed module graphs, seed-reproducible, budgeted) with `ablate_module` / `ablate_edge` / `execute`; `latin_hypercube`, `full_factorial`; `bootstrap_ci`, `permutation_test`, `holm_correction` |
+| J. Classical ML | `RandomForest`, `DecisionTree`, `KMeans`, `NaiveBayes` (same `fit` / `predict` / `evaluate` as the neural models) |
+
+```python
+import saturncube as sc
+
+src = "int f(int x) { int acc = 1; for (int i = 2; i <= x; i++) { acc *= i; } return acc; }"
+sc.run_c(src, "f", 5)                                   # 120, run in a safe interpreter (step limit, int32 wraparound)
+
+synth = sc.EnumerativeSynthesizer(["x", "y"], max_size=7)
+f = synth.to_function(synth.synthesize([((a, b), max(a, b)) for a in range(-3, 4) for b in range(-3, 4)]))
+sc.UnitTests("f", [((1, 2), 2), ((5, -1), 5)], backend="gcc").run(f).ok     # real gcc, sandboxed
+```
+
+**Safety.** `Sandbox` applies CPU, memory, file-size and time limits, runs in a temporary directory with an empty
+environment and kills the whole process group on timeout, but it is **not** a security boundary (no network or
+filesystem isolation). Run untrusted generated code inside a container or VM.
 
 ## Optimizers
 

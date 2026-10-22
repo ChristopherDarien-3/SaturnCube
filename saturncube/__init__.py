@@ -42,4 +42,19 @@ from .graph import (Graph, Tree, GraphConvolutionalNetwork, GraphAttentionNetwor
                     GatedGraphNetwork, RecurrentGraphNetwork, HypergraphNeuralNetwork, ProgramGraphNetwork,
                     TreeLSTM, TreeStructuredNetwork, PointerNetwork, PointerGenerator)
 
-__version__ = "0.4.0"
+from .search import GeneticAlgorithm, SuccessiveHalving, RandomSearch, SimulatedAnnealing
+from .symbolic import (parse, parse_expr, to_c, walk, tree_size, run_c, Interpreter, ParseError, StepLimitExceeded,
+                       CRuntimeError, EnumerativeSynthesizer, Datalog, program_facts, REACHABILITY_RULES)
+
+from .retrieval import BM25Index, HashingEmbedder, VectorStore, CaseLibrary, tokenize_text
+from .cognition import SM2Scheduler, InterleavedPractice, RevisionLoop, MetacognitiveMonitor
+from .verify import (Sandbox, UnitTests, TestReport, check_property, differential_test, ints, lists, IntGen,
+                     ListGen, PropertyResult)
+
+from .codegen import GrammarGenerator, C_GRAMMAR, TemplateFiller, TEMPLATES, BPETokenizer
+from .experiment import (ArchitectureSpec, RandomArchitectureGenerator, MODULE_KINDS, validate, ablate_module,
+                         ablate_edge, execute, latin_hypercube, full_factorial, bootstrap_ci, permutation_test,
+                         holm_correction)
+from .classical import DecisionTree, RandomForest, KMeans, NaiveBayes
+
+__version__ = "0.5.0"
