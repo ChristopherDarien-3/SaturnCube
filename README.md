@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.5, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL. plus three techniques from each of the search, symbolic, memory, cognition, verification, code-generation, experiment-design and classical-ML wheels (below). **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
+> **Status: v0.5, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
 
 ## Why
 
@@ -144,23 +144,22 @@ Every model below uses the same `create(name)` / `fit` / `predict` / `evaluate` 
 
 Notes: the alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) are research-style methods. They learn the easy blob task in `tests/test_rules.py` but are not reliable with default settings on harder problems such as XOR-like data; expect to tune them. Environments need `obs_dim` and either `n_actions` or `action_dim`/`action_high` (see `sc.OneHotObs`, `sc.PointMass`). `ModelBasedMPC` on one-hot discrete observations needs `project=` to keep predicted states valid. Graphs use dense adjacency, so they suit up to a few thousand nodes in total.
 
-## Wheels C-J (v0.5): tools around the models
+## Search, symbolic, memory and other tools (v0.5)
 
-Three commonly used techniques for each wheel of the project plan. They are plain Python classes (not
-`fit(X, y)` models) that work together on **Python code** by default; `examples/python_pipeline.py` wires several
-of them into one loop. Optional C support (a mini-C parser/interpreter and a gcc sandbox) is included for anyone who
-wants it; it is not needed for anything else in the library.
+Besides the `fit` / `predict` models, SaturnCube includes a set of commonly used building blocks. They are plain
+Python classes that work together on **Python code**; `examples/python_pipeline.py` wires several of them into one loop
+(retrieve a similar solved case, synthesize a program from examples, verify it, store it).
 
-| Wheel | Techniques |
+| Area | Techniques |
 |---|---|
-| C. Search | `GeneticAlgorithm` (typed genes), `SuccessiveHalving` (+ `RandomSearch` baseline), `SimulatedAnnealing` |
-| D. Symbolic | `EnumerativeSynthesizer` (programs from examples, emits Python or C); `Datalog` forward chaining with `python_facts` (call graph, assignments, reads from any Python source); `check_python` / `run_py` restricted step-limited evaluator for small generated functions. Optional C: `parse` / `run_c` / `to_c` (recursive-descent parser, AST, int32 interpreter) |
-| E. Memory | `BM25Index`, `VectorStore` (cosine k-NN, optional LSH) with `HashingEmbedder`, `CaseLibrary` (case-based memory with forgetting and consolidation) |
-| F. Cognition | `SM2Scheduler` (spaced repetition), `InterleavedPractice`, `RevisionLoop` (predict-act-observe-revise) with `MetacognitiveMonitor` (calibration, abstention) |
-| G. Verification | `UnitTests` (backends `python`, `python-subprocess`, and optional C `interp` / `gcc`), `PythonSandbox` (child process with CPU / memory / time limits), `check_property` / `differential_test` with shrinking. Optional C: `Sandbox` (gcc compile + limited run) |
-| H. Generation | `GrammarGenerator` with `PY_GRAMMAR` (and optional `C_GRAMMAR`; supports guidance), `TemplateFiller` (sketch synthesis, `language="python"` or `"c"`), `BPETokenizer` |
-| I. Experiment design | `RandomArchitectureGenerator` (typed module graphs, seed-reproducible, budgeted) with `ablate_module` / `ablate_edge` / `execute`; `latin_hypercube`, `full_factorial`; `bootstrap_ci`, `permutation_test`, `holm_correction` |
-| J. Classical ML | `RandomForest`, `DecisionTree`, `KMeans`, `NaiveBayes` (same `fit` / `predict` / `evaluate` as the neural models) |
+| Search and optimization | `GeneticAlgorithm` (typed genes), `SuccessiveHalving` (+ `RandomSearch` baseline), `SimulatedAnnealing` |
+| Program synthesis and symbolic reasoning | `EnumerativeSynthesizer` (programs from input/output examples); `Datalog` forward chaining with `python_facts` (call graph, assignments and reads from any Python source); `check_python` / `run_py` (restricted, step-limited evaluator for small generated functions) |
+| Memory and retrieval | `BM25Index`, `VectorStore` (cosine k-NN, optional LSH) with `HashingEmbedder`, `CaseLibrary` (case-based memory with forgetting and consolidation) |
+| Learning strategies | `SM2Scheduler` (spaced repetition), `InterleavedPractice`, `RevisionLoop` (predict-act-observe-revise) with `MetacognitiveMonitor` (calibration, abstention) |
+| Verification and testing | `UnitTests` (backends `python` and `python-subprocess`), `PythonSandbox` (child process with CPU / memory / time limits), `check_property` / `differential_test` with shrinking |
+| Code generation | `GrammarGenerator` with `PY_GRAMMAR` (supports guidance), `TemplateFiller` (sketch synthesis), `BPETokenizer` |
+| Experiment design and statistics | `RandomArchitectureGenerator` (typed module graphs, seed-reproducible, budgeted) with `ablate_module` / `ablate_edge` / `execute`; `latin_hypercube`, `full_factorial`; `bootstrap_ci`, `permutation_test`, `holm_correction` |
+| Classical ML | `RandomForest`, `DecisionTree`, `KMeans`, `NaiveBayes` (same `fit` / `predict` / `evaluate` as the neural models) |
 
 ```python
 import saturncube as sc
@@ -177,8 +176,8 @@ best, fitness = sc.GeneticAlgorithm(lambda g: -sum(x * x for x in g), [("float",
 
 **Safety.** `run_py` only accepts a small side-effect-free subset of Python (no imports, attributes, comprehensions,
 exponentiation, ...) and has a step limit, but it is a convenience for checking small generated functions, **not** a
-security boundary. `PythonSandbox` (and the optional gcc `Sandbox`) add process-level CPU, memory, file-size and time
-limits and kill runaway processes, but provide no network or filesystem isolation. Run untrusted code in a container or VM.
+security boundary. `PythonSandbox` adds process-level CPU, memory, file-size and time limits and kills runaway
+processes, but provides no network or filesystem isolation. Run untrusted code in a container or VM.
 
 ## Optimizers
 
@@ -255,32 +254,29 @@ This is a single small run on toy data, meant to show the interface working, not
 
 ## Known limitations
 
-- Vector/tabular input only. Sequence, image, graph and other families are not implemented yet.
-- No GPU testing yet, and no handling of categorical features or missing values.
+- Image models (CNN) and the spiking / biologically inspired family are not implemented yet.
+- Most models are tested on small synthetic problems only. There is no GPU testing, and no handling of categorical features or missing values.
 - Regression targets are not standardized, so very badly scaled targets may train slowly.
-- `MoE` evaluates all experts and masks them, so it is correct but not sparse-efficient.
-- `deep_ffn` is deliberately large for toy problems; shrink `hidden` for small datasets.
+- The alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) need tuning on harder problems.
+- `MoE` evaluates all experts and masks them, so it is correct but not sparse-efficient. `deep_ffn` is deliberately large for toy problems; shrink `hidden` for small datasets.
+- Graph models use dense adjacency, so they suit up to a few thousand nodes in total. Deep RL is tested on tiny environments.
+- `LwF` helps little in class-incremental settings, which is a known weakness of the method.
+- Only a few techniques are implemented in each of the tool areas above (for example, search has three algorithms).
 
 ## Development
 
 ```bash
 pip install -e . pytest
-pytest tests
+pytest tests                      # the full suite takes several minutes
 python examples/compare_all.py
+python examples/python_pipeline.py
 ```
 
-The test suite trains every model on classification and regression, and checks save/load round trips.
+The tests train and check each model family on small synthetic tasks and cover save/load round trips, so a regression in the shared trainer shows up across many families at once.
 
 ## Roadmap
 
-- Deep RL (DQN family, REINFORCE, actor-critic, PPO, TRPO, SAC), model-based RL, inverse RL, preference learning
-- Meta-learning (MAML, Reptile), few-shot and transfer learning, curriculum and self-paced learning, generative replay
-- Three-factor rules, STDP and predictive coding (these need the spiking and recurrent families)
-- Remaining optimizers (conjugate gradient, coordinate descent, natural gradient, K-FAC, Shampoo)
-- sklearn wrappers (random forest, logistic regression) in the same interface
-- Sequence models (RNN, LSTM, GRU, state-space models) and attention layers
-- Metric-learning models, then graph and spiking networks as optional extras
-
-## License
-
-Add a license before publishing (for example MIT).
+- Spiking and biologically inspired models: SNN (LIF, AdEx), Hodgkin-Huxley, STDP and reward-modulated STDP, liquid/LTC networks, neural cellular automata, SOM, Neural Gas, ART, differentiable logic networks
+- More search and planning: CMA-ES, NEAT, MAP-Elites, Bayesian optimization, A*, Monte Carlo tree search, SAT/SMT-based synthesis
+- Program repair and mutation testing on top of the verification tools
+- Image models (CNN) and GPU testing
