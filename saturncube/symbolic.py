@@ -409,7 +409,33 @@ def run_c(source, function, *args, max_steps=200_000):
 _BIN_FUNCS = dict(_OPS)
 _BIN_FUNCS["&&"] = lambda a, b: int(bool(a) and bool(b))
 _BIN_FUNCS["||"] = lambda a, b: int(bool(a) or bool(b))
+_PY_FUNCS = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b,
+             "<": lambda a, b: int(a < b), ">": lambda a, b: int(a > b), "<=": lambda a, b: int(a <= b),
+             ">=": lambda a, b: int(a >= b), "==": lambda a, b: int(a == b), "!=": lambda a, b: int(a != b),
+             "&&": lambda a, b: int(bool(a) and bool(b)), "||": lambda a, b: int(bool(a) or bool(b))}
 _COMMUTATIVE = {"+", "*", "==", "!=", "&&", "||"}
+
+
+def to_python(node):
+    """Print an expression AST (Num, Var, BinOp, Cond, UnOp) as a Python expression."""
+    if isinstance(node, Num):
+        return str(node.v)
+    if isinstance(node, Var):
+        return node.name
+    if isinstance(node, BinOp):
+        op = {"&&": "and", "||": "or"}.get(node.op, node.op)
+        def side(x, right):
+            s = to_python(x)
+            if isinstance(x, Cond) or (isinstance(x, BinOp) and (_PREC[x.op] < _PREC[node.op] or (right and _PREC[x.op] == _PREC[node.op]))):
+                return f"({s})"
+            return s
+        text = f"{side(node.l, False)} {op} {side(node.r, True)}"
+        return f"int({text})" if node.op in ("&&", "||") else text   # keep boolean connectives integer-valued
+    if isinstance(node, UnOp):
+        return f"{'-' if node.op == '-' else 'not '}({to_python(node.e)})" if isinstance(node.e, (BinOp, Cond)) else f"{'-' if node.op == '-' else 'not '}{to_python(node.e)}"
+    if isinstance(node, Cond):
+        return f"({to_python(node.a)} if {to_python(node.c)} else {to_python(node.b)})"
+    raise TypeError(f"cannot print {type(node).__name__}")
 
 
 @register("enumerative_synthesis", family="symbolic")
@@ -418,15 +444,20 @@ class EnumerativeSynthesizer:
     Expressions are built by increasing size; two expressions with identical outputs on the
     examples are treated as equivalent (only the smallest is kept), which keeps the search small."""
 
-    def __init__(self, variables, constants=(0, 1, 2), ops=("+", "-", "*", "<", "=="), use_ite=True, max_size=9):
+    def __init__(self, variables, constants=(0, 1, 2), ops=("+", "-", "*", "<", "=="), use_ite=True, max_size=9,
+                 language="python"):
+        if language not in ("python", "c"):
+            raise ValueError("language must be 'python' or 'c'")
         self.vars, self.consts, self.ops, self.use_ite, self.max_size = tuple(variables), tuple(constants), tuple(ops), use_ite, max_size
-        self.explored_ = 0
+        self.language, self.explored_ = language, 0
+        self._funcs = _PY_FUNCS if language == "python" else _BIN_FUNCS     # C: 32-bit wraparound semantics
+        self._norm = (lambda v: v) if language == "python" else wrap32
 
     def synthesize(self, examples):
         """examples: list of (inputs, output); inputs is a tuple in the order of `variables`.
         Returns the smallest matching expression (AST) or None."""
         inputs = [tuple(e[0]) if not isinstance(e[0], int) else (e[0],) for e in examples]
-        target = tuple(wrap32(e[1]) for e in examples)
+        target = tuple(self._norm(e[1]) for e in examples)
         seen, by_size, self.explored_ = {}, {}, 0
         for s in range(1, self.max_size + 1):
             bucket = []
@@ -441,10 +472,10 @@ class EnumerativeSynthesizer:
                 for i, v in enumerate(self.vars):
                     add(Var(v), tuple(inp[i] for inp in inputs))
                 for c in self.consts:
-                    add(Num(c), (wrap32(c),) * len(inputs))
+                    add(Num(c), (self._norm(c),) * len(inputs))
             else:
                 for op in self.ops:
-                    f = _BIN_FUNCS[op]
+                    f = self._funcs[op]
                     for sl in range(1, s - 1):
                         sr = s - 1 - sl
                         if op in _COMMUTATIVE and sl > sr:
@@ -474,6 +505,9 @@ class EnumerativeSynthesizer:
         return None
 
     def to_function(self, expr, name="f"):
+        """Source code for the synthesized expression in the synthesizer's language."""
+        if self.language == "python":
+            return f"def {name}({', '.join(self.vars)}):\n    return {to_python(expr)}\n"
         return f"int {name}({', '.join('int ' + v for v in self.vars)}) {{\n    return {to_c(expr)};\n}}"
 
 

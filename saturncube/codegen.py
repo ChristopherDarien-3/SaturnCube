@@ -9,6 +9,9 @@ from collections import Counter
 import numpy as np
 
 from .base import register
+import ast
+
+from .pycode import ExecutionError, check_python, run_py
 from .symbolic import CRuntimeError, ParseError, StepLimitExceeded, parse, run_c
 
 _NT = re.compile(r"<\w+>")
@@ -77,7 +80,29 @@ C_GRAMMAR = {
 }
 
 
+PY_GRAMMAR = {
+    "<func>": [["def f(x, y):\n    t = ", "<init>", "\n", "<stmts>", "    return ", "<expr>", "\n"]],
+    "<init>": [(2, ["<iatom>"]), ["(", "<iatom>", " + ", "<iatom>", ")"], ["(", "<iatom>", " * ", "<iatom>", ")"]],
+    "<iatom>": [["x"], ["y"], ["0"], ["1"], ["2"], ["3"]],
+    "<stmts>": [(1, [""]), (2, ["<stmt>", "<stmts>"])],
+    "<stmt>": [["    t = ", "<expr>", "\n"],
+               ["    if ", "<cond>", ":\n        t = ", "<expr>", "\n"],
+               ["    if ", "<cond>", ":\n        t = ", "<expr>", "\n    else:\n        t = ", "<expr>", "\n"],
+               ["    for i in range(", "<small>", "):\n        t = t + ", "<expr>", "\n"]],
+    "<cond>": [["<expr>", " < ", "<expr>"], ["<expr>", " == ", "<expr>"], ["(", "<cond>", " and ", "<cond>", ")"]],
+    "<expr>": [(3, ["<atom>"]), (2, ["(", "<expr>", " + ", "<expr>", ")"]), (1, ["(", "<expr>", " - ", "<expr>", ")"]),
+               (1, ["(", "<expr>", " * ", "<expr>", ")"]), (1, ["(", "<expr>", " if ", "<cond>", " else ", "<expr>", ")"])],
+    "<atom>": [["x"], ["y"], ["t"], ["0"], ["1"], ["2"], ["3"]],
+    "<small>": [["2"], ["3"], ["4"]],
+}
+
+
 # ------------------------------------------------------------------ templates / sketches ---
+PY_TEMPLATES = {
+    "loop_sum": "def f(n):\n    acc = {{init}}\n    for i in range(n):\n        acc = acc + {{term}}\n    return acc\n",
+    "clamp": "def f(x):\n    if x < {{lo}}:\n        return {{lo}}\n    if x > {{hi}}:\n        return {{hi}}\n    return x\n",
+    "select": "def f(x, y):\n    if {{cond}}:\n        return {{then}}\n    return {{other}}\n",
+}
 TEMPLATES = {
     "loop_sum": "int f(int n) {\n    int acc = {{init}};\n    for (int i = 0; i < n; i++) { acc = acc + {{term}}; }\n    return acc;\n}",
     "clamp": "int f(int x) {\n    if (x < {{lo}}) { return {{lo}}; }\n    if (x > {{hi}}) { return {{hi}}; }\n    return x;\n}",
@@ -91,8 +116,11 @@ class TemplateFiller:
     """Slot-based code construction: a template with {{slots}} is completed from candidate fragments.
     Every filled program is parsed, so structurally invalid fragments are rejected."""
 
-    def __init__(self, template):
-        self.template = TEMPLATES.get(template, template)
+    def __init__(self, template, language="python"):
+        if language not in ("python", "c"):
+            raise ValueError("language must be 'python' or 'c'")
+        self.language = language
+        self.template = (PY_TEMPLATES if language == "python" else TEMPLATES).get(template, template)
         self.slots = list(dict.fromkeys(_SLOT.findall(self.template)))
 
     def fill(self, **values):
@@ -100,7 +128,7 @@ class TemplateFiller:
         if missing:
             raise KeyError(f"missing slots: {sorted(missing)}")
         src = _SLOT.sub(lambda m: str(values[m.group(1)]), self.template)
-        parse(src)
+        check_python(src) if self.language == "python" else parse(src)
         return src
 
     def enumerate(self, candidates):
@@ -116,10 +144,11 @@ class TemplateFiller:
         for n, src in enumerate(self.enumerate(candidates)):
             if n >= limit:
                 break
+            run = run_py if self.language == "python" else run_c
             try:
-                if all(run_c(src, function, *a) == out for a, out in examples):
+                if all(run(src, function, *a) == out for a, out in examples):
                     return src
-            except (CRuntimeError, StepLimitExceeded):
+            except (CRuntimeError, ExecutionError, StepLimitExceeded):
                 continue
         return None
 

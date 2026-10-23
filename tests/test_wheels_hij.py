@@ -6,18 +6,21 @@ from test_v03 import blobs
 
 
 # ------------------------------------------------------------------ wheel H: generation ---
-def test_grammar_generation_is_always_valid_and_runnable():
-    gen, rng = sc.GrammarGenerator(sc.C_GRAMMAR), np.random.default_rng(0)
-    sizes = set()
+@pytest.mark.parametrize("language", ["python", "c"])
+def test_grammar_generation_is_always_valid_and_runnable(language):
+    grammar, run = (sc.PY_GRAMMAR, sc.run_py) if language == "python" else (sc.C_GRAMMAR, sc.run_c)
+    check = sc.check_python if language == "python" else sc.parse
+    gen, rng = sc.GrammarGenerator(grammar), np.random.default_rng(0)
+    texts = set()
     for _ in range(150):
         src = gen.generate(rng, max_depth=6)
-        prog = sc.parse(src)                                   # syntactically valid by construction
-        sizes.add(sc.tree_size(prog))
+        check(src)                                             # syntactically valid by construction
+        texts.add(src)
         for x, y in [(2, 3), (-1, 5), (0, 0)]:
-            sc.run_c(src, "f", x, y, max_steps=50_000)         # and runs without error
-    assert len(sizes) > 20                                     # varied programs, not one repeated output
-    shallow = sc.GrammarGenerator(sc.C_GRAMMAR).generate(rng, max_depth=1)
-    assert sc.tree_size(sc.parse(shallow)) < 25                # the depth limit forces short derivations
+            run(src, "f", x, y, max_steps=50_000)              # and runs without error
+    assert len(texts) > 50                                     # varied programs, not one repeated output
+    shallow = gen.generate(rng, max_depth=1)
+    assert len(shallow) < 120                                  # the depth limit forces short derivations
 
 
 def test_guided_generation_follows_the_chooser():
@@ -25,6 +28,8 @@ def test_guided_generation_follows_the_chooser():
     always_atom = lambda nt, prods, depth: 0                   # a stand-in for a learned policy: first production always
     src = gen.generate(max_depth=5, chooser=always_atom)
     assert src == gen.generate(max_depth=5, chooser=always_atom) and sc.run_c(src, "f", 1, 2) is not None
+    py = sc.GrammarGenerator(sc.PY_GRAMMAR).generate(max_depth=5, chooser=always_atom)
+    assert sc.run_py(py, "f", 1, 2) is not None
 
 
 def test_template_sketch_synthesis():
@@ -37,7 +42,9 @@ def test_template_sketch_synthesis():
     with pytest.raises(sc.ParseError):
         t.fill(init="0", term="i +")                          # invalid fragment is rejected
     clamp = sc.TemplateFiller("clamp").fill(lo="0", hi="10")
-    assert [sc.run_c(clamp, "f", v) for v in (-5, 4, 99)] == [0, 4, 10]
+    assert [sc.run_py(clamp, "f", v) for v in (-5, 4, 99)] == [0, 4, 10]
+    c_clamp = sc.TemplateFiller("clamp", language="c").fill(lo="0", hi="10")                # optional C variant
+    assert [sc.run_c(c_clamp, "f", v) for v in (-5, 4, 99)] == [0, 4, 10]
 
 
 def test_bpe_round_trips_and_compresses_code():
@@ -127,9 +134,10 @@ def test_classical_models_share_the_experiment_loop_with_neural_ones():
         assert m.fit(X[:450], y[:450]).evaluate(X[450:], y[450:])["accuracy"] > 0.9, name
 
 
-def test_end_to_end_example_runs():
-    import sys, pathlib
+@pytest.mark.parametrize("module", ["python_pipeline", "c_pipeline"])
+def test_end_to_end_examples_run(module):
+    import importlib, pathlib, sys
     sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "examples"))
-    import c_programmer_pipeline
-    src = c_programmer_pipeline.main()
-    assert src is not None and all(sc.run_c(src, "f", a, b) == max(a, b) for a in range(-4, 5) for b in range(-4, 5))
+    src = importlib.import_module(module).main()
+    run = sc.run_py if module == "python_pipeline" else sc.run_c
+    assert src is not None and all(run(src, "f", a, b) == max(a, b) for a in range(-4, 5) for b in range(-4, 5))

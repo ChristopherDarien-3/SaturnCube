@@ -97,18 +97,35 @@ def test_metacognitive_monitor_calibration_and_selective_prediction():
 
 
 # ---------------------------------------------------------------- wheel G: verification ---
-ABS_OK = "int f(int x) { if (x < 0) { return -x; } return x; }"
-ABS_BAD = "int f(int x) { return x; }"
 CASES = [((-3,), 3), ((4,), 4), ((0,), 0)]
+SOURCES = {"python": ("def f(x):\n    return -x if x < 0 else x\n", "def f(x):\n    return x\n", "def f(x):\n    return\n    x +\n"),
+           "python-subprocess": ("def f(x):\n    return -x if x < 0 else x\n", "def f(x):\n    return x\n", "def f(x:\n    return x\n"),
+           "interp": ("int f(int x) { if (x < 0) { return -x; } return x; }", "int f(int x) { return x; }", "int f(int x) { return ; }"),
+           "gcc": ("int f(int x) { if (x < 0) { return -x; } return x; }", "int f(int x) { return x; }", "int f(int x) { return ; }")}
 
 
-@pytest.mark.parametrize("backend", ["interp"] + (["gcc"] if HAS_GCC else []))
-def test_unit_tests_on_both_backends(backend):
+@pytest.mark.parametrize("backend", ["python", "python-subprocess", "interp"] + (["gcc"] if HAS_GCC else []))
+def test_unit_tests_on_every_backend(backend):
+    ok, wrong, broken = SOURCES[backend]
     t = sc.UnitTests("f", CASES, backend=backend)
-    assert t.run(ABS_OK).ok
-    rep = t.run(ABS_BAD)
+    assert t.run(ok).ok
+    rep = t.run(wrong)
     assert not rep.ok and rep.failures == [((-3,), 3, -3)]
-    assert not t.run("int f(int x) { return ; }").compile_ok
+    assert not t.run(broken).compile_ok
+
+
+def test_python_sandbox_limits():
+    sb = sc.PythonSandbox(timeout=1.0, cpu_seconds=1, memory_mb=256)
+    assert sb.run("print(6 * 7)").stdout == "42\n"
+    t0 = time.time()
+    r = sb.run("while True:\n    pass")
+    assert (r.timed_out or r.signal_name in ("SIGKILL", "SIGXCPU")) and time.time() - t0 < 4
+    assert "MemoryError" in sb.run("x = bytearray(2 * 10**9)").stderr                  # memory limit applied
+    r = sb.run("raise ValueError('boom')")
+    assert r.returncode != 0 and "boom" in r.stderr
+    res = sb.call_cases("def f(x):\n    if x == 2:\n        while True:\n            pass\n    return 10 // x\n", "f", [((5,), 0), ((0,), 0), ((2,), 0), ((1,), 0)])
+    assert res[0] == ("ok", 2) and res[1][0] == "error" and "ZeroDivision" in res[1][1]
+    assert res[2][0] == "missing" and res[3][0] == "missing"                            # a hang loses only the cases after it
 
 
 @pytest.mark.skipif(not HAS_GCC, reason="gcc not installed")
@@ -120,7 +137,7 @@ def test_sandbox_enforces_limits():
     assert not bad.ok and "error" in bad.diagnostics
     t0 = time.time()
     _, rr = sb.build_and_run("int main(void){ for(;;){} }")
-    assert rr.timed_out or rr.signal_name in ("SIGKILL", "SIGXCPU") and time.time() - t0 < 5
+    assert (rr.timed_out or rr.signal_name in ("SIGKILL", "SIGXCPU")) and time.time() - t0 < 5
     _, rr = sb.build_and_run('#include <stdio.h>\n#include <stdlib.h>\nint main(void){ void *p = malloc(1UL<<32); puts(p ? "alloc" : "denied"); return 0; }')
     assert rr.stdout.strip() == "denied"                                   # memory limit applied
     _, rr = sb.build_and_run("int main(void){ int *p = 0; return *p; }")
@@ -137,8 +154,8 @@ def test_property_testing_shrinks_to_minimal_counterexamples():
 
 def test_differential_testing_catches_a_buggy_candidate():
     ref = lambda x, y: max(x, y)
-    good = lambda x, y: sc.run_c("int f(int x, int y) { return x < y ? y : x; }", "f", x, y)
-    buggy = lambda x, y: sc.run_c("int f(int x, int y) { return x < y ? y : y; }", "f", x, y)
+    good = lambda x, y: sc.run_py("def f(x, y):\n    return y if x < y else x\n", "f", x, y)
+    buggy = lambda x, y: sc.run_py("def f(x, y):\n    return y if x < y else y\n", "f", x, y)
     assert sc.differential_test(good, ref, [sc.ints(-50, 50)] * 2).ok
     r = sc.differential_test(buggy, ref, [sc.ints(-50, 50)] * 2)
     assert not r.ok and r.shrunk[0] >= r.shrunk[1] and abs(r.shrunk[0]) <= 1 or not r.ok

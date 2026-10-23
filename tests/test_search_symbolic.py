@@ -78,22 +78,24 @@ def test_pretty_printer_round_trips():
 
 
 # ------------------------------------------------------------------ enumerative synthesis ---
-def synth(fn, n_vars=2, **kw):
+def synth(fn, n_vars=2, language="python", **kw):
     vals = list(itertools.product(range(-3, 4), repeat=n_vars))
     ex = [(v, fn(*v)) for v in vals]
-    s = sc.EnumerativeSynthesizer(["x", "y"][:n_vars], **kw)
+    s = sc.EnumerativeSynthesizer(["x", "y"][:n_vars], language=language, **kw)
     expr = s.synthesize(ex)
     return s, expr, ex
 
 
+@pytest.mark.parametrize("language", ["python", "c"])
 @pytest.mark.parametrize("name,fn,nv", [("sum_sq", lambda x, y: x * x + y * y, 2), ("max", max, 2),
                                          ("abs", abs, 1), ("poly", lambda x: x * x * x - x, 1)])
-def test_enumerative_synthesis_finds_programs(name, fn, nv):
-    s, expr, ex = synth(fn, nv, max_size=9)
+def test_enumerative_synthesis_finds_programs(name, fn, nv, language):
+    s, expr, ex = synth(fn, nv, language, max_size=9)
     assert expr is not None, name
     src = s.to_function(expr)
-    for args, out in ex:                                           # verify the generated C by running it
-        assert sc.run_c(src, "f", *args) == out
+    run = sc.run_py if language == "python" else sc.run_c
+    for args, out in ex:                                           # verify the generated code by running it
+        assert run(src, "f", *args) == out
 
 
 def test_synthesis_returns_none_when_budget_too_small():
@@ -118,3 +120,30 @@ def test_datalog_transitive_closure_and_program_analysis():
     g.run()
     assert {b["Y"] for b in g.query("reaches", "a", "Y")} == {"b", "c"}   # a calls b, which calls c
     assert ("assigns", "a", "t") in g.facts
+
+
+# ------------------------------------------------------------ Python-native tools ---
+def test_run_py_semantics_and_restrictions():
+    fib = "def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
+    assert sc.run_py(fib, "fib", 12) == 144
+    loop = "def f(n):\n    acc = 0\n    for i in range(n):\n        acc += i * i\n    return acc\n"
+    assert sc.run_py(loop, "f", 6) == 55 and sc.run_py("def f(a, b):\n    return a // b, a % b\n", "f", 7, 2) == (3, 1)
+    with pytest.raises(sc.StepLimitExceeded):
+        sc.run_py("def f(x):\n    while True:\n        x = x + 1\n    return x\n", "f", 0, max_steps=3000)
+    with pytest.raises(sc.ExecutionError):
+        sc.run_py("def f(x):\n    return 1 // x\n", "f", 0)
+    for bad in ["import os\ndef f(x):\n    return x\n", "def f(x):\n    return x.real\n", "def f(x):\n    return x ** 9\n",
+                "def f(x):\n    return open('a')\n", "def f(x):\n    return [i for i in range(3)]\n",
+                "def f(x):\n    return x.__class__\n", "def f(x:\n    return x\n"]:
+        with pytest.raises(sc.ParseError):
+            sc.check_python(bad)
+
+
+def test_python_facts_feed_datalog():
+    src = "def c(x):\n    return x\ndef b(x):\n    return c(x) + 1\ndef a(x):\n    t = b(x)\n    return t\n"
+    g = sc.Datalog()
+    g.facts |= sc.python_facts(src)
+    for head, body in sc.REACHABILITY_RULES:
+        g.add_rule(head, *body)
+    g.run()
+    assert {b["Y"] for b in g.query("reaches", "a", "Y")} == {"b", "c"} and ("assigns", "a", "t") in g.facts

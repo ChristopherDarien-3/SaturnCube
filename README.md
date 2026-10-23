@@ -146,34 +146,39 @@ Notes: the alternative learning rules (`forward_gradient`, `local_error`, `synth
 
 ## Wheels C-J (v0.5): tools around the models
 
-Three commonly used techniques for each wheel of the project plan. They are plain Python classes
-(not `fit(X, y)` models) and fit together; `examples/c_programmer_pipeline.py` wires several of them into one loop.
+Three commonly used techniques for each wheel of the project plan. They are plain Python classes (not
+`fit(X, y)` models) that work together on **Python code** by default; `examples/python_pipeline.py` wires several
+of them into one loop. Optional C support (a mini-C parser/interpreter and a gcc sandbox) is included for anyone who
+wants it; it is not needed for anything else in the library.
 
 | Wheel | Techniques |
 |---|---|
 | C. Search | `GeneticAlgorithm` (typed genes), `SuccessiveHalving` (+ `RandomSearch` baseline), `SimulatedAnnealing` |
-| D. Symbolic | `parse` / `run_c` / `to_c`: recursive-descent parser, AST and safe step-limited interpreter for a small C subset; `EnumerativeSynthesizer` (programs from examples); `Datalog` forward chaining (+ `program_facts` for call-graph analysis) |
+| D. Symbolic | `EnumerativeSynthesizer` (programs from examples, emits Python or C); `Datalog` forward chaining with `python_facts` (call graph, assignments, reads from any Python source); `check_python` / `run_py` restricted step-limited evaluator for small generated functions. Optional C: `parse` / `run_c` / `to_c` (recursive-descent parser, AST, int32 interpreter) |
 | E. Memory | `BM25Index`, `VectorStore` (cosine k-NN, optional LSH) with `HashingEmbedder`, `CaseLibrary` (case-based memory with forgetting and consolidation) |
 | F. Cognition | `SM2Scheduler` (spaced repetition), `InterleavedPractice`, `RevisionLoop` (predict-act-observe-revise) with `MetacognitiveMonitor` (calibration, abstention) |
-| G. Verification | `Sandbox` (gcc compile + resource-limited run), `UnitTests` (interpreter or gcc), `check_property` / `differential_test` with shrinking |
-| H. Generation | `GrammarGenerator` (+ `C_GRAMMAR`, optional guidance), `TemplateFiller` (sketch synthesis), `BPETokenizer` |
+| G. Verification | `UnitTests` (backends `python`, `python-subprocess`, and optional C `interp` / `gcc`), `PythonSandbox` (child process with CPU / memory / time limits), `check_property` / `differential_test` with shrinking. Optional C: `Sandbox` (gcc compile + limited run) |
+| H. Generation | `GrammarGenerator` with `PY_GRAMMAR` (and optional `C_GRAMMAR`; supports guidance), `TemplateFiller` (sketch synthesis, `language="python"` or `"c"`), `BPETokenizer` |
 | I. Experiment design | `RandomArchitectureGenerator` (typed module graphs, seed-reproducible, budgeted) with `ablate_module` / `ablate_edge` / `execute`; `latin_hypercube`, `full_factorial`; `bootstrap_ci`, `permutation_test`, `holm_correction` |
 | J. Classical ML | `RandomForest`, `DecisionTree`, `KMeans`, `NaiveBayes` (same `fit` / `predict` / `evaluate` as the neural models) |
 
 ```python
 import saturncube as sc
 
-src = "int f(int x) { int acc = 1; for (int i = 2; i <= x; i++) { acc *= i; } return acc; }"
-sc.run_c(src, "f", 5)                                   # 120, run in a safe interpreter (step limit, int32 wraparound)
-
+examples = [((a, b), max(a, b)) for a in range(-3, 4) for b in range(-3, 4)]
 synth = sc.EnumerativeSynthesizer(["x", "y"], max_size=7)
-f = synth.to_function(synth.synthesize([((a, b), max(a, b)) for a in range(-3, 4) for b in range(-3, 4)]))
-sc.UnitTests("f", [((1, 2), 2), ((5, -1), 5)], backend="gcc").run(f).ok     # real gcc, sandboxed
+src = synth.to_function(synth.synthesize(examples))        # "def f(x, y):\n    return (y if x < y else x)\n"
+
+sc.UnitTests("f", examples).run(src).ok                    # True: checked in the restricted evaluator
+sc.UnitTests("f", examples, backend="python-subprocess").run(src).ok   # or in a resource-limited child process
+
+best, fitness = sc.GeneticAlgorithm(lambda g: -sum(x * x for x in g), [("float", -5, 5)] * 4, seed=0).run()
 ```
 
-**Safety.** `Sandbox` applies CPU, memory, file-size and time limits, runs in a temporary directory with an empty
-environment and kills the whole process group on timeout, but it is **not** a security boundary (no network or
-filesystem isolation). Run untrusted generated code inside a container or VM.
+**Safety.** `run_py` only accepts a small side-effect-free subset of Python (no imports, attributes, comprehensions,
+exponentiation, ...) and has a step limit, but it is a convenience for checking small generated functions, **not** a
+security boundary. `PythonSandbox` (and the optional gcc `Sandbox`) add process-level CPU, memory, file-size and time
+limits and kill runaway processes, but provide no network or filesystem isolation. Run untrusted code in a container or VM.
 
 ## Optimizers
 
@@ -276,3 +281,6 @@ The test suite trains every model on classification and regression, and checks s
 - Sequence models (RNN, LSTM, GRU, state-space models) and attention layers
 - Metric-learning models, then graph and spiking networks as optional extras
 
+## License
+
+Add a license before publishing (for example MIT).
