@@ -37,9 +37,9 @@ PyTorch, install `torch` first following https://pytorch.org, then install Satur
 From source:
 
 ```bash
-git clone <this repository>
-cd saturncube
-pip install -e ".[dev]"
+git clone https://github.com/ChristopherDarien-3/SaturnCube.git
+cd SaturnCube
+python -m pip install -e ".[dev]"
 ```
 
 ## Usage
