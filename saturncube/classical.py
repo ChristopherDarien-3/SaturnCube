@@ -1,4 +1,4 @@
-"""Wheel J: classical machine learning with the same fit / predict / evaluate interface:
+"""Classical machine learning with the same fit / predict / evaluate interface:
 decision tree + random forest, k-means and Gaussian naive Bayes (pure NumPy)."""
 from __future__ import annotations
 

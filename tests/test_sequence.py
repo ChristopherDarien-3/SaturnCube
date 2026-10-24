@@ -4,6 +4,8 @@ import torch
 
 import saturncube as sc
 
+pytestmark = pytest.mark.slow
+
 rng = np.random.default_rng(0)
 X = rng.normal(size=(500, 10, 2)).astype(np.float32)
 y = (X[:, :, 0].sum(1) > 0).astype(int)          # needs integration over the whole sequence

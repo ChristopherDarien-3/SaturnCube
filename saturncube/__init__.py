@@ -44,18 +44,21 @@ from .graph import (Graph, Tree, GraphConvolutionalNetwork, GraphAttentionNetwor
 
 from .pycode import check_python, run_py, PythonSandbox, python_facts, ExecutionError
 from .search import GeneticAlgorithm, SuccessiveHalving, RandomSearch, SimulatedAnnealing
-from .symbolic import (parse, parse_expr, to_c, walk, tree_size, run_c, Interpreter, ParseError, StepLimitExceeded,
-                       CRuntimeError, EnumerativeSynthesizer, Datalog, program_facts, REACHABILITY_RULES, to_python)
+from .symbolic import (walk, tree_size, to_python, ParseError, StepLimitExceeded, EnumerativeSynthesizer, Datalog,
+                       REACHABILITY_RULES)
 
 from .retrieval import BM25Index, HashingEmbedder, VectorStore, CaseLibrary, tokenize_text
 from .cognition import SM2Scheduler, InterleavedPractice, RevisionLoop, MetacognitiveMonitor
-from .verify import (Sandbox, UnitTests, TestReport, check_property, differential_test, ints, lists, IntGen,
+from .verify import (UnitTests, TestReport, check_property, differential_test, ints, lists, IntGen,
                      ListGen, PropertyResult)
 
-from .codegen import GrammarGenerator, C_GRAMMAR, PY_GRAMMAR, TemplateFiller, TEMPLATES, PY_TEMPLATES, BPETokenizer
+from .codegen import GrammarGenerator, PY_GRAMMAR, TemplateFiller, TEMPLATES, BPETokenizer
 from .experiment import (ArchitectureSpec, RandomArchitectureGenerator, MODULE_KINDS, validate, ablate_module,
                          ablate_edge, execute, latin_hypercube, full_factorial, bootstrap_ci, permutation_test,
                          holm_correction)
 from .classical import DecisionTree, RandomForest, KMeans, NaiveBayes
 
-__version__ = "0.5.0"
+from .vision import CNN, CNNNet
+from .spiking import SpikingNetwork, SelfOrganizingMap, LIFLayer
+
+__version__ = "0.6.0"

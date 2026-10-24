@@ -1,17 +1,11 @@
-"""Wheel G: verification. Sandboxed compile-and-run for real C, unit testing (against the safe
-interpreter or gcc), and property-based testing with shrinking (test-case minimization).
+"""Verification: unit testing of generated functions (restricted in-process evaluator or a resource-limited
+child process) and property-based testing with shrinking (test-case minimization).
 
-SECURITY NOTE: the sandbox applies CPU, memory, file-size and wall-clock limits, runs in a throw-away
-directory with an empty environment, and kills the whole process group on timeout. It is NOT a
-security boundary (no network or filesystem isolation). Run untrusted code in a container or VM."""
+SECURITY NOTE: the Python backends limit steps, CPU, memory and time but are NOT a security boundary (no network or
+filesystem isolation). Run untrusted code in a container or VM."""
 from __future__ import annotations
 
-import os
-import resource
-import shutil
-import signal
-import subprocess
-import tempfile
+import ast
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -19,72 +13,7 @@ import numpy as np
 
 from .base import register
 from .pycode import ExecutionError, PythonSandbox, check_python, run_py
-from .symbolic import CRuntimeError, ParseError, StepLimitExceeded, run_c, parse
-
-
-@dataclass
-class CompileResult:
-    ok: bool
-    diagnostics: str
-    warnings: int = 0
-
-
-@dataclass
-class RunResult:
-    returncode: Optional[int]
-    stdout: str
-    stderr: str
-    timed_out: bool = False
-    signal_name: Optional[str] = None
-
-
-@register("sandbox", family="verification")
-class Sandbox:
-    """Compile C with gcc and run the result under resource limits."""
-
-    def __init__(self, timeout=2.0, cpu_seconds=2, memory_mb=256, compiler="gcc", flags=("-O0", "-Wall", "-Wextra", "-Werror=return-type", "-Werror=implicit-function-declaration")):
-        if shutil.which(compiler) is None:
-            raise RuntimeError(f"{compiler} not found")
-        self.timeout, self.cpu, self.mem, self.compiler, self.flags = timeout, cpu_seconds, memory_mb, compiler, tuple(flags)
-
-    def _limits(self):
-        def apply():
-            resource.setrlimit(resource.RLIMIT_CPU, (self.cpu, self.cpu))
-            resource.setrlimit(resource.RLIMIT_AS, (self.mem << 20, self.mem << 20))
-            resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        return apply
-
-    def _compile(self, tmp, source):
-        path = os.path.join(tmp, "prog.c")
-        with open(path, "w") as f:
-            f.write(source)
-        p = subprocess.run([self.compiler, *self.flags, "-o", os.path.join(tmp, "prog"), path], capture_output=True, text=True,
-                           timeout=30, cwd=tmp, env={"PATH": "/usr/bin:/bin", "LANG": "C"})
-        return CompileResult(p.returncode == 0, p.stderr.strip(), p.stderr.count("warning:"))
-
-    def compile(self, source):
-        """Compile only (syntax/type check); the binary is discarded."""
-        with tempfile.TemporaryDirectory() as tmp:
-            return self._compile(tmp, source)
-
-    def build_and_run(self, source, stdin="", args=()):
-        with tempfile.TemporaryDirectory() as tmp:
-            cr = self._compile(tmp, source)
-            if not cr.ok:
-                return cr, None
-            proc = subprocess.Popen([os.path.join(tmp, "prog"), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, text=True, cwd=tmp, env={}, preexec_fn=self._limits(),
-                                    start_new_session=True)
-            try:
-                out, err = proc.communicate(stdin, timeout=self.timeout)
-                timed = False
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                out, err = proc.communicate()
-                timed = True
-            sig = signal.Signals(-proc.returncode).name if proc.returncode is not None and proc.returncode < 0 else None
-            return cr, RunResult(proc.returncode, out, err, timed, sig)
+from .symbolic import ParseError, StepLimitExceeded
 
 
 @dataclass
@@ -102,24 +31,23 @@ class TestReport:
 
 @register("unit_tests", family="verification")
 class UnitTests:
-    """Unit tests for one function. cases: [(args_tuple, expected)]. Backends:
-    'python' (default) restricted in-process evaluator for small generated functions; 'python-subprocess'
-    runs the Python source in a resource-limited child process (any Python allowed);
-    'interp' / 'gcc' are the optional C backends (mini-C interpreter / real gcc in the sandbox)."""
+    """Unit tests for one function. cases: [(args_tuple, expected)]. Backends: 'python' (default) restricted
+    in-process evaluator for small generated functions; 'python-subprocess' runs the source in a
+    resource-limited child process (any Python is allowed there)."""
 
     def __init__(self, function, cases, backend="python", sandbox=None):
-        if backend not in ("python", "python-subprocess", "interp", "gcc"):
-            raise ValueError("backend must be 'python', 'python-subprocess', 'interp' or 'gcc'")
+        if backend not in ("python", "python-subprocess"):
+            raise ValueError("backend must be 'python' or 'python-subprocess'")
         self.fn, self.cases, self.backend = function, list(cases), backend
-        self.sandbox = sandbox or (Sandbox() if backend == "gcc" else PythonSandbox() if backend == "python-subprocess" else None)
+        self.sandbox = sandbox or (PythonSandbox() if backend == "python-subprocess" else None)
 
     def run(self, source):
+        fails = []
         if self.backend == "python":
             try:
                 check_python(source)
             except ParseError as e:
                 return TestReport(0, len(self.cases), compile_ok=False, message=str(e))
-            fails = []
             for args, exp in self.cases:
                 try:
                     got = run_py(source, self.fn, *args)
@@ -128,40 +56,12 @@ class UnitTests:
                 if got != exp:
                     fails.append((args, exp, got))
             return TestReport(len(self.cases) - len(fails), len(self.cases), fails)
-        if self.backend == "python-subprocess":
-            import ast
-            try:
-                ast.parse(source)
-            except SyntaxError as e:
-                return TestReport(0, len(self.cases), compile_ok=False, message=str(e))
-            fails = []
-            for (args, exp), (kind, val) in zip(self.cases, self.sandbox.call_cases(source, self.fn, self.cases)):
-                got = val if kind == "ok" else f"{kind}: {val}"
-                if got != exp:
-                    fails.append((args, exp, got))
-            return TestReport(len(self.cases) - len(fails), len(self.cases), fails)
-        if self.backend == "interp":
-            try:
-                parse(source)
-            except ParseError as e:
-                return TestReport(0, len(self.cases), compile_ok=False, message=str(e))
-            fails = []
-            for args, exp in self.cases:
-                try:
-                    got = run_c(source, self.fn, *args)
-                except (CRuntimeError, StepLimitExceeded) as e:
-                    got = f"error: {e}"
-                if got != exp:
-                    fails.append((args, exp, got))
-            return TestReport(len(self.cases) - len(fails), len(self.cases), fails)
-        calls = "\n".join(f'    printf("%d\\n", {self.fn}({", ".join(map(str, a))}));' for a, _ in self.cases)
-        cr, rr = self.sandbox.build_and_run(f"#include <stdio.h>\n{source}\nint main(void) {{\n{calls}\n    return 0;\n}}\n")
-        if not cr.ok:
-            return TestReport(0, len(self.cases), compile_ok=False, message=cr.diagnostics)
-        lines = rr.stdout.split()
-        fails = []
-        for i, (args, exp) in enumerate(self.cases):
-            got = int(lines[i]) if i < len(lines) else (f"crashed ({rr.signal_name})" if rr.signal_name else "timeout" if rr.timed_out else "no output")
+        try:
+            ast.parse(source)
+        except SyntaxError as e:
+            return TestReport(0, len(self.cases), compile_ok=False, message=str(e))
+        for (args, exp), (kind, val) in zip(self.cases, self.sandbox.call_cases(source, self.fn, self.cases)):
+            got = val if kind == "ok" else f"{kind}: {val}"
             if got != exp:
                 fails.append((args, exp, got))
         return TestReport(len(self.cases) - len(fails), len(self.cases), fails)

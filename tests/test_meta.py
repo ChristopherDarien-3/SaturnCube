@@ -5,6 +5,8 @@ import torch
 import saturncube as sc
 from test_v03 import blobs, tasks
 
+pytestmark = pytest.mark.slow
+
 
 # ------------------------------------------------------------------ metric learning ---
 def pairs(X, y, n, seed=0):

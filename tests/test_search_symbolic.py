@@ -1,5 +1,4 @@
 import itertools
-import math
 
 import numpy as np
 import pytest
@@ -7,7 +6,7 @@ import pytest
 import saturncube as sc
 
 
-# ------------------------------------------------------------------ wheel C: search ---
+# -------------------------------------------------------------------------- search ---
 def test_genetic_algorithm_float_and_discrete():
     ga = sc.GeneticAlgorithm(lambda g: -sum(x * x for x in g), [("float", -5, 5)] * 4, generations=60, seed=0)
     best, fit = ga.run()
@@ -42,87 +41,7 @@ def test_simulated_annealing_solves_small_tsp():
     assert e <= 1.05 * optimum
 
 
-# ----------------------------------------------------------- wheel D: parser / interpreter ---
-FACT = """
-int fact(int n) {
-    int acc = 1;
-    for (int i = 2; i <= n; i++) { acc *= i; }
-    return acc;
-}
-int fib(int n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }
-int gcd(int a, int b) { while (b != 0) { int t = a % b; a = b; b = t; } return a; }
-"""
-
-
-def test_parser_and_interpreter_semantics():
-    assert sc.run_c(FACT, "fact", 5) == 120 and sc.run_c(FACT, "fib", 10) == 55 and sc.run_c(FACT, "gcd", 48, 18) == 6
-    assert sc.run_c("int f(int x) { return x * 100000 * 100000; }", "f", 3) == (3 * 10 ** 10 + 2 ** 31) % 2 ** 32 - 2 ** 31  # wraps like int32
-    assert sc.run_c("int f(int a, int b) { return a / b; }", "f", -7, 2) == -3 and sc.run_c("int f(int a, int b) { return a % b; }", "f", -7, 2) == -1
-    assert sc.run_c("int f(int x) { return x > 0 && x < 10 ? 1 : 0 - 1; }", "f", 5) == 1
-    with pytest.raises(sc.CRuntimeError):
-        sc.run_c("int f(int x) { return 1 / x; }", "f", 0)
-    with pytest.raises(sc.StepLimitExceeded):
-        sc.run_c("int f(int x) { while (1) { x = x + 1; } return x; }", "f", 0, max_steps=5000)
-    with pytest.raises(sc.ParseError):
-        sc.parse("int f( { }")
-
-
-def test_pretty_printer_round_trips():
-    prog = sc.parse(FACT)
-    again = sc.parse(sc.to_c(prog))
-    assert again == prog                                           # print -> parse gives the same tree
-    assert sc.run_c(sc.to_c(prog), "fact", 6) == 720
-    e = sc.parse_expr("(a + b) * c - (d - e)")
-    assert sc.parse_expr(sc.to_c(e)) == e
-    assert sc.tree_size(prog) > 30 and any(type(n).__name__ == "For" for n in sc.walk(prog))
-
-
-# ------------------------------------------------------------------ enumerative synthesis ---
-def synth(fn, n_vars=2, language="python", **kw):
-    vals = list(itertools.product(range(-3, 4), repeat=n_vars))
-    ex = [(v, fn(*v)) for v in vals]
-    s = sc.EnumerativeSynthesizer(["x", "y"][:n_vars], language=language, **kw)
-    expr = s.synthesize(ex)
-    return s, expr, ex
-
-
-@pytest.mark.parametrize("language", ["python", "c"])
-@pytest.mark.parametrize("name,fn,nv", [("sum_sq", lambda x, y: x * x + y * y, 2), ("max", max, 2),
-                                         ("abs", abs, 1), ("poly", lambda x: x * x * x - x, 1)])
-def test_enumerative_synthesis_finds_programs(name, fn, nv, language):
-    s, expr, ex = synth(fn, nv, language, max_size=9)
-    assert expr is not None, name
-    src = s.to_function(expr)
-    run = sc.run_py if language == "python" else sc.run_c
-    for args, out in ex:                                           # verify the generated code by running it
-        assert run(src, "f", *args) == out
-
-
-def test_synthesis_returns_none_when_budget_too_small():
-    _, expr, _ = synth(lambda x, y: x * x + y * y + 7 * x * y, 2, max_size=3)
-    assert expr is None
-
-
-# ----------------------------------------------------------------------------- Datalog ---
-def test_datalog_transitive_closure_and_program_analysis():
-    d = sc.Datalog()
-    for a, b in [("a", "b"), ("b", "c"), ("c", "d")]:
-        d.add_fact("parent", a, b)
-    d.add_rule(("anc", "X", "Y"), ("parent", "X", "Y"))
-    d.add_rule(("anc", "X", "Z"), ("parent", "X", "Y"), ("anc", "Y", "Z"))
-    d.run()
-    assert {b["Y"] for b in d.query("anc", "a", "Y")} == {"b", "c", "d"}
-    prog = sc.parse("int c(int x) { return x; } int b(int x) { return c(x) + 1; } int a(int x) { int t = b(x); return t; }")
-    g = sc.Datalog()
-    g.facts |= sc.program_facts(prog)
-    for head, *body in [(h, *b) for h, b in sc.REACHABILITY_RULES]:
-        g.add_rule(head, *body)
-    g.run()
-    assert {b["Y"] for b in g.query("reaches", "a", "Y")} == {"b", "c"}   # a calls b, which calls c
-    assert ("assigns", "a", "t") in g.facts
-
-
-# ------------------------------------------------------------ Python-native tools ---
+# ------------------------------------------------------------ restricted evaluator ---
 def test_run_py_semantics_and_restrictions():
     fib = "def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
     assert sc.run_py(fib, "fib", 12) == 144
@@ -137,6 +56,41 @@ def test_run_py_semantics_and_restrictions():
                 "def f(x):\n    return x.__class__\n", "def f(x:\n    return x\n"]:
         with pytest.raises(sc.ParseError):
             sc.check_python(bad)
+
+
+# ------------------------------------------------------------ enumerative synthesis ---
+def synth(fn, n_vars=2, **kw):
+    ex = [(v, fn(*v)) for v in itertools.product(range(-3, 4), repeat=n_vars)]
+    s = sc.EnumerativeSynthesizer(["x", "y"][:n_vars], **kw)
+    return s, s.synthesize(ex), ex
+
+
+@pytest.mark.parametrize("name,fn,nv", [("sum_sq", lambda x, y: x * x + y * y, 2), ("max", max, 2),
+                                         ("abs", abs, 1), ("poly", lambda x: x * x * x - x, 1)])
+def test_enumerative_synthesis_finds_programs(name, fn, nv):
+    s, expr, ex = synth(fn, nv, max_size=9)
+    assert expr is not None, name
+    src = s.to_function(expr)
+    for args, out in ex:                                           # verify the generated code by running it
+        assert sc.run_py(src, "f", *args) == out
+
+
+def test_synthesis_returns_none_when_budget_too_small_and_validates_ops():
+    _, expr, _ = synth(lambda x, y: x * x + y * y + 7 * x * y, 2, max_size=3)
+    assert expr is None
+    with pytest.raises(ValueError):
+        sc.EnumerativeSynthesizer(["x"], ops=("+", "**"))
+
+
+# ----------------------------------------------------------------------------- Datalog ---
+def test_datalog_transitive_closure():
+    d = sc.Datalog()
+    for a, b in [("a", "b"), ("b", "c"), ("c", "d")]:
+        d.add_fact("parent", a, b)
+    d.add_rule(("anc", "X", "Y"), ("parent", "X", "Y"))
+    d.add_rule(("anc", "X", "Z"), ("parent", "X", "Y"), ("anc", "Y", "Z"))
+    assert d.run() == 6                                               # 3 + 2 + 1 ancestor facts
+    assert {b["Y"] for b in d.query("anc", "a", "Y")} == {"b", "c", "d"}
 
 
 def test_python_facts_feed_datalog():

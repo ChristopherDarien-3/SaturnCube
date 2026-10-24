@@ -1,4 +1,4 @@
-"""Python-native program tools (the Python counterpart of the optional C tools in symbolic.py / verify.py).
+"""Python program tools used by synthesis and verification.
 
 * check_python / run_py: a restricted, step-limited evaluator for small generated Python functions,
 * PythonSandbox: runs arbitrary Python in a separate process with CPU / memory / time limits,

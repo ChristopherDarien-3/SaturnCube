@@ -4,6 +4,8 @@ import pytest
 import saturncube as sc
 from test_v03 import blobs
 
+pytestmark = pytest.mark.slow
+
 X, y = blobs(n=600, k=3, d=6, sep=2.5, seed=0)
 Xtr, ytr, Xte, yte = X[:450], y[:450], X[450:], y[450:]
 

@@ -1,4 +1,4 @@
-"""A tiny end-to-end loop using several wheels together (all Python):
+"""A tiny end-to-end loop using several tools together:
 
  E  retrieve similar solved cases from memory        (CaseLibrary)
  F  predict -> act -> observe -> revise              (RevisionLoop)
@@ -7,7 +7,7 @@
  E  store the verified solution back in memory
 
 Use backend="python-subprocess" to run candidates in a resource-limited child process instead.
-(examples/c_pipeline.py is the same loop for C, using the optional gcc sandbox.)
+
 """
 import saturncube as sc
 

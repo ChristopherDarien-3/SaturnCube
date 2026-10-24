@@ -1,4 +1,4 @@
-"""Wheel C: search and optimization. Genetic algorithm, successive halving (with a random-search
+"""Search and optimization. Genetic algorithm, successive halving (with a random-search
 baseline) and simulated annealing. All are gradient-free and work on any evaluable object."""
 from __future__ import annotations
 

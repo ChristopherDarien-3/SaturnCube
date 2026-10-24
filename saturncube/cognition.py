@@ -1,4 +1,4 @@
-"""Wheel F: problem-solving strategies inspired by human learning. Spaced repetition (SM-2),
+"""Problem-solving strategies inspired by human learning. Spaced repetition (SM-2),
 interleaved practice, and a predict-act-observe-revise loop with confidence monitoring."""
 from __future__ import annotations
 

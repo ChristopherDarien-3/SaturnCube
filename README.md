@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.5, early development.** Implemented: vector/tabular, sequence, attention, memory, metric/few-shot, graph/tree/pointer, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). **Not built yet:** the spiking / biologically inspired family (SNN, STDP, Hodgkin-Huxley, NCA, SOM, ART, ...). Image models (CNN) are not included. The API may change.
+> **Status: v0.6, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between 0.x releases.
 
 ## Why
 
@@ -27,13 +27,20 @@ Libraries like Keras, scikit-learn and PyCaret already make common models short 
 
 ## Install
 
-Not on PyPI yet. From a clone of this repository:
-
 ```bash
-pip install -e .
+pip install saturncube
 ```
 
-Requires Python 3.9+, `torch` and `numpy`.
+Requires Python 3.9+, `numpy` and `torch` (installed automatically). For a CPU-only or a specific CUDA build of
+PyTorch, install `torch` first following https://pytorch.org, then install SaturnCube.
+
+From source:
+
+```bash
+git clone <this repository>
+cd saturncube
+pip install -e ".[dev]"
+```
 
 ## Usage
 
@@ -143,6 +150,29 @@ Every model below uses the same `create(name)` / `fit` / `predict` / `evaluate` 
 | Optimizers (added) | `cg`, `coordinate_descent`, `shampoo`, `kfac`, `natural_gradient` |
 
 Notes: the alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) are research-style methods. They learn the easy blob task in `tests/test_rules.py` but are not reliable with default settings on harder problems such as XOR-like data; expect to tune them. Environments need `obs_dim` and either `n_actions` or `action_dim`/`action_high` (see `sc.OneHotObs`, `sc.PointMass`). `ModelBasedMPC` on one-hot discrete observations needs `project=` to keep predicted states valid. Graphs use dense adjacency, so they suit up to a few thousand nodes in total.
+
+## Images and biologically inspired models (v0.6)
+
+| Registry name | Class | Notes |
+|---|---|---|
+| `cnn` | `CNN` | Compact ResNet-style convolutional network (residual stages, batch norm, global pooling). Images as `(n, C, H, W)` or `(n, H, W)`; classification or regression. |
+| `snn` | `SpikingNetwork` | Leaky integrate-and-fire neurons trained with surrogate gradients. `encoding="direct"` or `"rate"`; `firing_rates(X)` reports sparsity. |
+| `som` | `SelfOrganizingMap` | Kohonen map: unsupervised, topology-preserving. `transform`, `u_matrix`, `hit_map`, `quantization_error`, `topographic_error`, and `label_units` + `classify` for classification. |
+
+```python
+import saturncube as sc
+
+cnn = sc.CNN(width=16, epochs=25).fit(images, labels)          # images: (n, 1, 16, 16)
+snn = sc.SpikingNetwork(hidden=(64,), n_steps=16, encoding="rate").fit(X, y)
+print(snn.firing_rates(X))                                     # e.g. [0.2]: neurons fire on ~20% of time steps
+
+som = sc.SelfOrganizingMap(grid=(10, 10)).fit(X)
+som.transform(X)                                               # (row, col) of each sample's best-matching unit
+som.label_units(X, y); som.classify(X_new)
+```
+
+In the test suite the CNN reaches 100% on a task where the pattern's position is random while a flat MLP reaches 60%,
+and the SOM unfolds into an ordered grid on uniform data (topographic error near 0).
 
 ## Search, symbolic, memory and other tools (v0.5)
 
@@ -254,7 +284,7 @@ This is a single small run on toy data, meant to show the interface working, not
 
 ## Known limitations
 
-- Image models (CNN) and the spiking / biologically inspired family are not implemented yet.
+- Image support is a single compact CNN, and the spiking / biologically inspired family has two models (LIF network, SOM); neither is a replacement for a dedicated vision or neuromorphic library.
 - Most models are tested on small synthetic problems only. There is no GPU testing, and no handling of categorical features or missing values.
 - Regression targets are not standardized, so very badly scaled targets may train slowly.
 - The alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) need tuning on harder problems.
@@ -276,7 +306,7 @@ The tests train and check each model family on small synthetic tasks and cover s
 
 ## Roadmap
 
-- Spiking and biologically inspired models: SNN (LIF, AdEx), Hodgkin-Huxley, STDP and reward-modulated STDP, liquid/LTC networks, neural cellular automata, SOM, Neural Gas, ART, differentiable logic networks
+- More biologically inspired models: STDP and reward-modulated STDP, liquid/LTC networks, neural cellular automata, ART, Hodgkin-Huxley neurons
 - More search and planning: CMA-ES, NEAT, MAP-Elites, Bayesian optimization, A*, Monte Carlo tree search, SAT/SMT-based synthesis
 - Program repair and mutation testing on top of the verification tools
-- Image models (CNN) and GPU testing
+- Larger image architectures and GPU benchmarking

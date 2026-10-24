@@ -1,4 +1,4 @@
-"""Wheel I: randomization and experimental design. Seed-reproducible random architecture graphs with
+"""Randomization and experimental design. Seed-reproducible random architecture graphs with
 type constraints and a cost budget (plus ablation), Latin hypercube / factorial designs, and the
 statistics needed to compare results (bootstrap CI, permutation test, Holm correction)."""
 from __future__ import annotations

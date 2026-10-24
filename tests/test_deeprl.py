@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 import saturncube as sc
 
+pytestmark = pytest.mark.slow
+
 grid = lambda: sc.OneHotObs(sc.GridWorld(size=3, max_steps=30))
 
 

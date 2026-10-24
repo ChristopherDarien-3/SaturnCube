@@ -1,4 +1,4 @@
-"""Wheel E: memory and retrieval. BM25 keyword search, a cosine-similarity vector store with an
+"""Memory and retrieval. BM25 keyword search, a cosine-similarity vector store with an
 optional locality-sensitive-hashing index, and a case library (episodic memory / case-based
 reasoning) with a forgetting policy and consolidation."""
 from __future__ import annotations

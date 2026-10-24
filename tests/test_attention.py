@@ -6,6 +6,8 @@ import saturncube as sc
 from saturncube.attention import MultiHeadAttention, LinearAttention, TransformerLayer, make_mask
 from test_sequence import Xtr, ytr, Xte, yte, tokens, V, perm
 
+pytestmark = pytest.mark.slow
+
 ATTN = ["transformer_encoder", "transformer_decoder", "linear_attention", "local_attention", "sparse_attention",
         "multi_query", "grouped_query", "universal_transformer", "memory_transformer", "perceiver",
         "ssm_attention_hybrid", "recurrent_attention"]

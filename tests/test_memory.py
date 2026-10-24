@@ -5,6 +5,8 @@ import torch
 import saturncube as sc
 from test_v03 import blobs
 
+pytestmark = pytest.mark.slow
+
 
 def test_hopfield_recalls_corrupted_patterns():
     r = np.random.default_rng(0)
