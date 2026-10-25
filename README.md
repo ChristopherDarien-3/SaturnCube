@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.6, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between 0.x releases.
+> **Status: v0.7, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between 0.x releases.
 
 ## Why
 
@@ -37,10 +37,59 @@ PyTorch, install `torch` first following https://pytorch.org, then install Satur
 From source:
 
 ```bash
-git clone https://github.com/ChristopherDarien-3/SaturnCube.git
-cd SaturnCube
-python -m pip install -e ".[dev]"
+git clone <this repository>
+cd saturncube
+pip install -e ".[dev]"
 ```
+
+## Preparing your own data (v0.7)
+
+Real datasets are messy. SaturnCube can load a CSV (or a DataFrame, dict, list of dicts or array), work out what each
+column is, clean it, split it and hand back arrays in the shape your model expects. Nothing happens silently:
+`report()` lists every decision and each one can be overridden.
+
+```python
+import saturncube as sc
+
+data = sc.load_dataset("customers.csv", target="Purchased")
+print(data.report())                 # detected column types, what will be done, and warnings
+
+prepared = data.prepare(test_size=0.2, val_size=0.1, seed=0)
+model = sc.MLP(hidden=(64, 32)).fit(prepared.X_train, prepared.y_train)
+print(model.evaluate(prepared.X_test, prepared.y_test))
+labels = prepared.decode_target(model.predict(prepared.X_test))        # back to the original labels
+
+prepared.save("pipeline.json")       # later: sc.load_pipeline("pipeline.json").transform(new_rows)
+```
+
+What it handles by default:
+
+| Problem | Behaviour |
+|---|---|
+| Delimiter, header, ragged rows | `;` `,` tab and `\|` are detected; short or long rows are padded or truncated and reported |
+| Number-like text | `"$52,000"`, `"12%"`, `"(5)"`, `"1e3"` become numbers; stray text in a numeric column counts as missing |
+| Missing values | `""`, `N/A`, `?`, `null`, `-`, ... are missing. Numbers: median (or mean/zero) plus an optional missing-flag column. Categories: their own category |
+| Categories | Case and whitespace variants are merged; one-hot of the 20 most common values; unseen values at inference map to "other" |
+| Booleans and dates | `yes/no/y/n/true/false` become 0/1; dates become year, month, day, weekday and timestamp |
+| Identifier, free-text, constant and mostly-empty columns | Dropped, and the report says why (`keep=[...]` overrides) |
+| Target | Task is inferred (override with `task=`); rows without a target are removed; labels are encoded and `decode_target` restores them |
+| Leakage | All statistics are fitted on the training rows only; a stratified split keeps class balance; suspiciously perfect features are flagged |
+
+Other model types:
+
+```python
+seq = data.prepare_sequences(window=24, horizon=1, target="demand", time_column="date")   # (n, 24, features), chronological split
+img = data.prepare_images(target="label")                    # flat pixel columns (e.g. MNIST CSV) -> (n, 1, 28, 28)
+
+result = sc.auto_model("customers.csv", target="Purchased", model="random_forest")        # load, clean, split, train, evaluate
+result.metrics; result.predict(new_rows)
+```
+
+`auto_model` picks the preparation from the model's family (tabular for vector and classical models; `window=` for sequence
+models; pixel columns for the CNN) and explains what to do for models it cannot prepare for automatically (graphs, pairs, ...).
+Models also give a clear error if you pass text or NaN values directly. The detection is heuristic, so read the report:
+a numeric code such as a zip code can be forced to categorical with `categorical=["zip"]`. Text columns, graphs and
+multi-table data are not handled yet. Install pandas (`pip install saturncube[data]`) to pass DataFrames.
 
 ## Usage
 
@@ -309,4 +358,4 @@ The tests train and check each model family on small synthetic tasks and cover s
 - More biologically inspired models: STDP and reward-modulated STDP, liquid/LTC networks, neural cellular automata, ART, Hodgkin-Huxley neurons
 - More search and planning: CMA-ES, NEAT, MAP-Elites, Bayesian optimization, A*, Monte Carlo tree search, SAT/SMT-based synthesis
 - Program repair and mutation testing on top of the verification tools
-- Larger image architectures and GPU benchmarking
+- Data preparation for text and graph data; larger image architectures and GPU benchmarking

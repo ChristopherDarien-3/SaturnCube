@@ -38,7 +38,8 @@ classifiers = [
 # --------------------------------------------------------------------------------------------
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "scipy", "build", "twine"]
+data = ["pandas>=1.5"]
+dev = ["pytest>=7", "scipy", "pandas>=1.5", "build", "twine"]
 
 [tool.setuptools.dynamic]
 version = { attr = "saturncube.__version__" }

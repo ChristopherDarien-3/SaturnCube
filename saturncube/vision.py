@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .base import BaseModel, register
+from .base import BaseModel, register, to_float_array
 
 
 class _ResBlock(nn.Module):
@@ -62,7 +62,7 @@ class CNN(BaseModel):
         self.dropout, self.channels_last = dropout, channels_last
 
     def _as_x(self, X):
-        X = np.asarray(X, dtype=np.float32)
+        X = to_float_array(X)
         if X.ndim == 3:                                    # grayscale (n, H, W)
             return X[..., None]
         if X.ndim == 4:

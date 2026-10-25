@@ -61,4 +61,7 @@ from .classical import DecisionTree, RandomForest, KMeans, NaiveBayes
 from .vision import CNN, CNNNet
 from .spiking import SpikingNetwork, SelfOrganizingMap, LIFLayer
 
-__version__ = "0.6.0"
+from .data import (load_dataset, Dataset, Prepared, Pipeline, TabularPreprocessor, Report, auto_model, AutoResult,
+                   load_pipeline, check_arrays, split_indices)
+
+__version__ = "0.7.0"

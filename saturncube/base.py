@@ -32,6 +32,20 @@ def create(name, *args, **kwargs):
     return REGISTRY[key](*args, **kwargs)
 
 
+def to_float_array(X):
+    """Convert input features to a finite float32 array, or raise an error that says how to fix the data."""
+    try:
+        X = np.asarray(X, dtype=np.float32)
+    except (ValueError, TypeError):
+        raise ValueError("X contains values that are not numbers (for example text categories or None). Encode them "
+                         "first, e.g. saturncube.load_dataset(...).prepare(), which handles categories, missing "
+                         "values and scaling.") from None
+    if not np.isfinite(X).all():
+        raise ValueError("X contains NaN or infinite values. Fill or remove them first, e.g. "
+                         "saturncube.load_dataset(...).prepare() imputes missing values.")
+    return X
+
+
 class BaseModel:
     """One interface for every model: fit / predict / evaluate / save / module.
 
@@ -86,7 +100,7 @@ class BaseModel:
     # ---- data handling -------------------------------------------------------
     @staticmethod
     def _as_x(X):
-        X = np.asarray(X, dtype=np.float32)
+        X = to_float_array(X)
         return X.reshape(-1, 1) if X.ndim == 1 else X
 
     def _init(self, X, y):
