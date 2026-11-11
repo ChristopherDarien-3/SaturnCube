@@ -339,6 +339,7 @@ class DNCNet(nn.Module):
 
 @register("ntm", family="memory")
 class NeuralTuringMachine(SequenceModel):
+    """Neural Turing Machine: an LSTM controller with an external memory addressed by content and location."""
     def __init__(self, hidden=64, n_slots=16, slot_size=8, **kw):
         super().__init__(hidden=hidden, **kw)
         self.n_slots, self.slot_size = n_slots, slot_size
@@ -349,6 +350,7 @@ class NeuralTuringMachine(SequenceModel):
 
 @register("dnc", family="memory")
 class DifferentiableNeuralComputer(SequenceModel):
+    """Differentiable Neural Computer: external memory with usage-based allocation and a temporal link matrix."""
     def __init__(self, hidden=64, n_slots=16, slot_size=8, n_reads=2, **kw):
         super().__init__(hidden=hidden, **kw)
         self.n_slots, self.slot_size, self.n_reads = n_slots, slot_size, n_reads

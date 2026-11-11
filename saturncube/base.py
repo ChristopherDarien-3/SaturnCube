@@ -1,6 +1,9 @@
 """Shared base class, trainer and registry for saturncube models."""
 from __future__ import annotations
 
+import time
+import warnings
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,19 +12,42 @@ import torch.nn.functional as F
 from .optim import make_optimizer
 
 REGISTRY: dict = {}
+_WARMED = False
 
 
-def register(name, family="vector"):
+def warmup():
+    """Pay PyTorch's one-time start-up cost now. Returns the seconds spent (0.0 if already warm).
+
+    The first torch.optim optimizer built in a process makes PyTorch import ~900 modules lazily: about a second on
+    a warm machine and 10-20 s on a cold disk (Colab, first run after install). It is PyTorch's cost, not a
+    property of any model, but it lands on whichever model is fitted first, so call this before timing anything.
+    """
+    global _WARMED
+    if _WARMED:
+        return 0.0
+    t0 = time.perf_counter()
+    m = torch.nn.Linear(2, 2)
+    opt = torch.optim.Adam(m.parameters())
+    m(torch.zeros(2, 2)).sum().backward()
+    opt.step()
+    _WARMED = True
+    return time.perf_counter() - t0
+
+
+def register(name, family="vector", hidden=False):
+    """Register a class under `name`. hidden=True keeps it creatable by name but out of available()."""
     def deco(cls):
-        cls.name, cls.family = name, family
+        cls.name, cls.family, cls.hidden = name, family, hidden
         REGISTRY[name] = cls
         return cls
     return deco
 
 
-def available(family=None):
-    """Names of registered models, optionally filtered by family."""
-    return sorted(n for n, c in REGISTRY.items() if family in (None, c.family))
+def available(family=None, include_hidden=False):
+    """Names of registered entries, optionally filtered by family. Hidden helpers (for example the
+    `unit_tests` runner, which is not a model) are left out unless include_hidden=True."""
+    return sorted(n for n, c in REGISTRY.items()
+                  if family in (None, c.family) and (include_hidden or not getattr(c, "hidden", False)))
 
 
 def create(name, *args, **kwargs):
@@ -64,13 +90,16 @@ class BaseModel:
     def __init__(self, input_dim=None, output_dim=None, task="auto", lr=None,
                  epochs=60, batch_size=64, weight_decay=0.0, normalize=True,
                  patience=None, device=None, seed=None, verbose=False,
-                 optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None):
+                 optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None, val_split=0.1):
         if task not in ("auto", "classification", "regression"):
             raise ValueError("task must be 'auto', 'classification' or 'regression'")
         self.input_dim, self.output_dim, self.task = input_dim, output_dim, task
         self.lr, self.epochs, self.batch_size = lr, epochs, batch_size
         self.weight_decay, self.normalize = weight_decay, normalize
         self.patience, self.verbose = patience, verbose
+        if not 0 <= val_split < 0.5:
+            raise ValueError("val_split must be in [0, 0.5)")
+        self.val_split = val_split  # share of training rows held out for early stopping when patience is set
         self.optimizer, self.optimizer_kwargs = optimizer, dict(optimizer_kwargs or {})
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if seed is not None:
@@ -82,6 +111,7 @@ class BaseModel:
         self.classes_ = None
         self._mu = self._sd = None
         self.history_ = {"loss": [], "val_loss": []}
+        self.n_val_, self.best_epoch_, self.stopped_epoch_ = 0, None, None
 
     # ---- to implement ------------------------------------------------------
     def build(self, d_in, d_out):
@@ -194,8 +224,12 @@ class BaseModel:
         return loss.item()
 
     def partial_fit(self, X, y):
-        """One epoch on new data (online / incremental learning)."""
-        return self.fit(X, y, epochs=1)
+        """One epoch on new data (online / incremental learning). Never holds rows out for early stopping."""
+        self._auto_val = False
+        try:
+            return self.fit(X, y, epochs=1)
+        finally:
+            self._auto_val = True
 
     def learn_task(self, X, y, epochs=None):
         """Train on one task, then let strategies consolidate (EWC Fisher, LwF snapshot, replay buffer)."""
@@ -205,8 +239,44 @@ class BaseModel:
             s.after_task(self, Xt, yt)
         return self
 
+    _auto_val = True
+
+    def _holdout(self, Xt, yt):
+        """Hold val_split of the rows out for early stopping: (Xtrain, ytrain, (Xval, yval)) or None if impossible.
+        Classification is stratified (every class keeps at least one training row); the draw uses torch's RNG, so
+        it follows `seed`."""
+        n = len(Xt)
+        if n < 20:
+            warnings.warn("only %d rows: too few for an automatic validation split, so patience has no effect" % n,
+                          stacklevel=4)
+            return None
+        if self.task == "classification" and yt.dim() == 1:
+            parts = []
+            for c in torch.unique(yt):
+                idx = (yt == c).nonzero().flatten()
+                idx = idx[torch.randperm(len(idx), device=idx.device)]
+                parts.append(idx[:min(int(round(len(idx) * self.val_split)), len(idx) - 1)])
+            val_idx = torch.cat(parts)
+        else:
+            val_idx = torch.randperm(n, device=Xt.device)[:max(1, int(round(n * self.val_split)))]
+        if len(val_idx) == 0:
+            warnings.warn("no rows could be held out for validation, so patience has no effect", stacklevel=4)
+            return None
+        keep = torch.ones(n, dtype=torch.bool, device=Xt.device)
+        keep[val_idx] = False
+        return Xt[keep], yt[keep], (Xt[val_idx], yt[val_idx])
+
     def _fit(self, Xt, yt, epochs, val):
         m = self._module
+        if val is None and self.patience is not None and self._auto_val:
+            if self.val_split:
+                held = self._holdout(Xt, yt)
+                if held is not None:
+                    Xt, yt, val = held
+            else:
+                warnings.warn("patience has no effect without validation data: pass val_data= or set val_split > 0",
+                              stacklevel=3)
+        self.n_val_, self.best_epoch_ = (0 if val is None else len(val[0])), None
         opt = make_optimizer(self.optimizer, m.parameters(), self.lr, self.weight_decay,
                              module=m, **self.optimizer_kwargs)
         n, best, wait, best_state = len(Xt), float("inf"), 0, None
@@ -221,13 +291,14 @@ class BaseModel:
                 loss = self._train_batch(m, opt, Xt[idx], yt[idx])
                 total += loss * len(idx)
             self.history_["loss"].append(total / n)
+            self.stopped_epoch_ = ep
             if val is not None:
                 with torch.no_grad():
                     v = self._loss(self._outputs(val[0]), val[1]).item()
                 self.history_["val_loss"].append(v)
                 if self.patience is not None:
                     if v < best - 1e-9:
-                        best, wait = v, 0
+                        best, wait, self.best_epoch_ = v, 0, ep
                         best_state = {k: t.clone() for k, t in m.state_dict().items()}
                     else:
                         wait += 1

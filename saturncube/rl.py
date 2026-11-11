@@ -106,18 +106,21 @@ class _TDAgent(TabularAgent):
 
 @register("q_learning", family="agent")
 class QLearning(_TDAgent):
+    """Tabular Q-learning (off-policy temporal-difference control)."""
     def _target(self, r, s2, a2, done):
         return r + (0.0 if done else self.gamma * self.Q[s2].max())
 
 
 @register("sarsa", family="agent")
 class SARSA(_TDAgent):
+    """Tabular SARSA (on-policy temporal-difference control)."""
     def _target(self, r, s2, a2, done):
         return r + (0.0 if done else self.gamma * self.Q[s2, a2])
 
 
 @register("expected_sarsa", family="agent")
 class ExpectedSARSA(_TDAgent):
+    """Tabular Expected SARSA: updates towards the expected value under an epsilon-greedy policy."""
     def _target(self, r, s2, a2, done):
         if done:
             return r
@@ -176,6 +179,7 @@ class _Bandit:
 
 @register("epsilon_greedy", family="bandit")
 class EpsilonGreedyBandit(_Bandit):
+    """Epsilon-greedy multi-armed bandit."""
     def __init__(self, n_arms, epsilon=0.1, seed=None):
         super().__init__(n_arms, seed)
         self.epsilon = epsilon
@@ -188,6 +192,7 @@ class EpsilonGreedyBandit(_Bandit):
 
 @register("ucb1", family="bandit")
 class UCB1(_Bandit):
+    """UCB1 multi-armed bandit (upper-confidence-bound exploration)."""
     def __init__(self, n_arms, c=2.0, seed=None):
         super().__init__(n_arms, seed)
         self.c = c

@@ -1,5 +1,5 @@
 """saturncube: one fit/predict/evaluate interface across many model families."""
-from .base import BaseModel, REGISTRY, available, create, register
+from .base import BaseModel, REGISTRY, available, create, register, warmup
 from .vector import (MLP, DeepFeedforward, ResNet, DenseNet, Highway, SqueezeExcitation,
                      MixtureOfExperts, GatedMixtureOfExperts, Hypernetwork, ImplicitNetwork,
                      DeepEquilibrium, KAN, RBF, ExtremeLearningMachine, RandomNeuralNetwork)
@@ -63,5 +63,7 @@ from .spiking import SpikingNetwork, SelfOrganizingMap, LIFLayer
 
 from .data import (load_dataset, Dataset, Prepared, Pipeline, TabularPreprocessor, Report, auto_model, AutoResult,
                    load_pipeline, check_arrays, split_indices)
+from .evaluation import benchmark, BenchmarkResult
+from .text import TextVectorizer, TokenEncoder, TextModel
 
 __version__ = "0.7.0"

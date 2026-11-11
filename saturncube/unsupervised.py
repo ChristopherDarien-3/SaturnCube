@@ -239,6 +239,7 @@ class DECNet(AENet):
 
 @register("deep_clustering", family="unsupervised")
 class DeepClustering(Unsupervised):
+    """Deep Embedded Clustering: autoencoder pretraining, k-means on the latent space, then refinement (`n_clusters`)."""
     def __init__(self, n_clusters=3, latent_dim=4, hidden=(32,), pretrain_epochs=40, **kw):
         super().__init__(latent_dim=latent_dim, hidden=hidden, **kw)
         self.n_clusters, self.pretrain_epochs = n_clusters, pretrain_epochs
@@ -287,6 +288,7 @@ class DeepClustering(Unsupervised):
 # ------------------------------------------------------------ model wrappers ---
 @register("autoencoder", family="unsupervised")
 class Autoencoder(Unsupervised):
+    """Autoencoder: compresses inputs to a latent code and reconstructs them."""
     def __init__(self, noise_std=0.0, **kw):
         super().__init__(**kw)
         self.noise_std = noise_std
@@ -303,12 +305,14 @@ class Autoencoder(Unsupervised):
 
 @register("denoising_ae", family="unsupervised")
 class DenoisingAutoencoder(Autoencoder):
+    """Denoising autoencoder: reconstructs clean inputs from noise-corrupted ones (`noise_std`)."""
     def __init__(self, noise_std=0.3, **kw):
         super().__init__(noise_std=noise_std, **kw)
 
 
 @register("vae", family="unsupervised")
 class VAE(Autoencoder):
+    """Variational autoencoder with a `beta`-weighted KL term; `sample()` draws new points."""
     def __init__(self, beta=1.0, **kw):
         super().__init__(**kw)
         self.beta = beta
@@ -326,6 +330,7 @@ class VAE(Autoencoder):
 
 @register("masked", family="unsupervised")
 class MaskedPrediction(Autoencoder):
+    """Masked prediction: hides random features (`mask_ratio`) and predicts them from the rest."""
     def __init__(self, mask_ratio=0.3, **kw):
         super().__init__(**kw)
         self.mask_ratio = mask_ratio
@@ -507,6 +512,7 @@ class JEPANet(nn.Module):
 
 @register("latent_prediction", family="unsupervised")
 class LatentPrediction(Unsupervised):
+    """JEPA-style latent prediction: predicts a slowly moving target encoder's embedding of the full input from a masked view."""
     def __init__(self, mask_ratio=0.4, tau=0.99, **kw):
         super().__init__(**kw)
         self.mask_ratio, self.tau = mask_ratio, tau

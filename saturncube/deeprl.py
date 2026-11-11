@@ -173,16 +173,19 @@ class DQN(DeepAgent):
 
 @register("double_dqn", family="agent")
 class DoubleDQN(DQN):
+    """DQN with double Q-learning targets."""
     double = True
 
 
 @register("dueling_dqn", family="agent")
 class DuelingDQN(DQN):
+    """DQN with a dueling value/advantage head."""
     dueling = True
 
 
 @register("prioritized_dqn", family="agent")
 class PrioritizedDQN(DQN):
+    """DQN with prioritized experience replay."""
     prioritized = True
 
 

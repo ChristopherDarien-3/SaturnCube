@@ -379,6 +379,7 @@ class RelationalGCN(GraphModel):
 
 @register("graph_transformer", family="graph")
 class GraphTransformer(GraphModel):
+    """Graph Transformer: attention among all nodes of a graph, with edges adding a learned bias to the scores."""
     layer_cls = GraphTransformerLayer
 
 
@@ -544,6 +545,7 @@ class _TreeModel(BaseModel):
 
 @register("tree_lstm", family="graph")
 class TreeLSTM(_TreeModel):
+    """Tree-LSTM over tree-structured inputs."""
     kind = "lstm"
 
 

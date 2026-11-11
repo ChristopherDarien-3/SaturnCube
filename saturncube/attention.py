@@ -251,6 +251,7 @@ class _AttnModel(_CoreModel):
 
 @register("transformer_encoder", family="sequence")
 class TransformerEncoder(_AttnModel):
+    """Transformer encoder: bidirectional self-attention with a mean-pooled readout over the sequence."""
     pass
 
 
@@ -262,11 +263,13 @@ class TransformerDecoder(_AttnModel):
 
 @register("linear_attention", family="sequence")
 class LinearAttentionTransformer(_AttnModel):
+    """Transformer with linear attention (positive feature map instead of softmax), linear in sequence length."""
     attention = "linear"
 
 
 @register("local_attention", family="sequence")
 class LocalAttentionTransformer(_AttnModel):
+    """Transformer whose attention is restricted to a local window (`window`)."""
     attention = "local"
 
     def __init__(self, window=3, **kw):
@@ -275,6 +278,7 @@ class LocalAttentionTransformer(_AttnModel):
 
 @register("sparse_attention", family="sequence")
 class SparseAttentionTransformer(_AttnModel):
+    """Transformer with sparse attention: a local window plus every `stride`-th position."""
     attention = "sparse"
 
     def __init__(self, window=2, stride=4, **kw):
@@ -283,11 +287,13 @@ class SparseAttentionTransformer(_AttnModel):
 
 @register("multi_query", family="sequence")
 class MultiQueryTransformer(_AttnModel):
+    """Transformer with multi-query attention: all query heads share one key/value head."""
     n_kv_heads_default = 1
 
 
 @register("grouped_query", family="sequence")
 class GroupedQueryTransformer(_AttnModel):
+    """Transformer with grouped-query attention: query heads share `n_kv_heads` key/value heads (2 by default)."""
     n_kv_heads_default = 2
 
 
@@ -300,6 +306,7 @@ class _OwnCore(_CoreModel):
 
 @register("universal_transformer", family="sequence")
 class UniversalTransformer(_OwnCore):
+    """Universal Transformer: one shared layer applied repeatedly (`n_steps`)."""
     def __init__(self, n_steps=4, **kw):
         super().__init__(**kw)
         self.n_steps = n_steps
@@ -310,6 +317,7 @@ class UniversalTransformer(_OwnCore):
 
 @register("memory_transformer", family="sequence")
 class MemoryAugmentedTransformer(_OwnCore):
+    """Memory-augmented Transformer: learned memory slots (`n_memory`) take part in attention."""
     def __init__(self, n_memory=8, **kw):
         super().__init__(**kw)
         self.n_memory = n_memory
@@ -320,6 +328,7 @@ class MemoryAugmentedTransformer(_OwnCore):
 
 @register("perceiver", family="sequence")
 class Perceiver(_OwnCore):
+    """Perceiver: a small latent array (`n_latents`) cross-attends to the input."""
     def __init__(self, n_latents=8, **kw):
         super().__init__(**kw)
         self.n_latents = n_latents
@@ -330,12 +339,14 @@ class Perceiver(_OwnCore):
 
 @register("ssm_attention_hybrid", family="sequence")
 class SSMAttentionHybrid(_OwnCore):
+    """Hybrid of Mamba-style state-space blocks and attention layers."""
     def make_core(self):
         return HybridCore(self.hidden, self.n_layers, self.n_heads, causal=self.causal)
 
 
 @register("recurrent_attention", family="sequence")
 class RecurrentAttention(_OwnCore):
+    """Recurrent attention: a GRU controller repeatedly queries the whole input (`n_glimpses`)."""
     def __init__(self, n_glimpses=4, **kw):
         super().__init__(**kw)
         self.n_glimpses = n_glimpses

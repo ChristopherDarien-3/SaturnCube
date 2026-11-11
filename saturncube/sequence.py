@@ -300,6 +300,7 @@ class _Recurrent(_CoreModel):
 
 @register("rnn", family="sequence")
 class SimpleRNN(_Recurrent):
+    """Vanilla recurrent network."""
     kind = "rnn"
 
 
@@ -311,31 +312,37 @@ class ElmanNetwork(_Recurrent):
 
 @register("lstm", family="sequence")
 class LSTM(_Recurrent):
+    """Long short-term memory network."""
     kind = "lstm"
 
 
 @register("gru", family="sequence")
 class GRU(_Recurrent):
+    """Gated recurrent unit network."""
     kind = "gru"
 
 
 @register("birnn", family="sequence")
 class BidirectionalRNN(_Recurrent):
+    """Bidirectional vanilla recurrent network."""
     kind, bi = "rnn", True
 
 
 @register("bilstm", family="sequence")
 class BidirectionalLSTM(_Recurrent):
+    """Bidirectional LSTM."""
     kind, bi = "lstm", True
 
 
 @register("bigru", family="sequence")
 class BidirectionalGRU(_Recurrent):
+    """Bidirectional GRU."""
     kind, bi = "gru", True
 
 
 @register("ctrnn", family="sequence")
 class ContinuousTimeRNN(_CoreModel):
+    """Continuous-time RNN integrated with Euler steps (`dt`, `substeps`)."""
     def __init__(self, hidden=32, dt=0.2, substeps=2, **kw):
         super().__init__(hidden=hidden, **kw)
         self.dt, self.substeps = dt, substeps
@@ -346,6 +353,7 @@ class ContinuousTimeRNN(_CoreModel):
 
 @register("neural_ssm", family="sequence")
 class NeuralStateSpace(_CoreModel):
+    """Neural state-space model: stable latent linear dynamics with a nonlinear emission network."""
     def __init__(self, hidden=32, state_dim=32, **kw):
         super().__init__(hidden=hidden, **kw)
         self.state_dim = state_dim
@@ -405,6 +413,7 @@ class JordanNet(nn.Module):
 
 @register("jordan", family="sequence")
 class JordanNetwork(SequenceModel):
+    """Jordan network: the previous output, not the hidden state, is fed back."""
     def build(self, d_in, d_out):
         return JordanNet(d_in, self.hidden, d_out, self.readout, self.vocab_size)
 

@@ -29,7 +29,7 @@ class TestReport:
         return self.compile_ok and self.passed == self.total
 
 
-@register("unit_tests", family="verification")
+@register("unit_tests", family="verification", hidden=True)
 class UnitTests:
     """Unit tests for one function. cases: [(args_tuple, expected)]. Backends: 'python' (default) restricted
     in-process evaluator for small generated functions; 'python-subprocess' runs the source in a
