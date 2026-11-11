@@ -1,4 +1,6 @@
-name: Publish to PyPI
+
+name: Publish to TestPyPI
+
 on:
   release:
     types: [published]
@@ -6,15 +8,33 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: testpypi            # create this environment in the repo settings
+
+    environment:
+      name: testpypi
+
     permissions:
-      id-token: write            # PyPI "trusted publishing": no API token is stored in the repo
+      contents: read
+      id-token: write
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install build twine
-      - run: python -m build
-      - run: twine check dist/*
-      - uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade build twine
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: python -m twine check dist/*
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
