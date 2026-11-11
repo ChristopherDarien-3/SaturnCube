@@ -124,3 +124,79 @@ def test_warmup_is_idempotent_and_benchmark_calls_it(monkeypatch):
     X, y = noisy(60)
     sc.benchmark(["naive_bayes"], X, y, seeds=1, baselines=False, show=False)
     assert calls == [1]
+
+
+# ------------------------------------------------------------- patience="auto": 10 for regression ---
+def noisy_regression(n=400, d=10, seed=0):
+    r = np.random.default_rng(seed)
+    X = r.normal(size=(n, d))
+    return X, X[:, 0] + 1.5 * r.normal(size=n)  # mostly noise: a big network overfits quickly
+
+
+def test_regression_stops_early_by_default_but_classification_does_not():
+    X, y = noisy_regression()
+    reg = sc.create("mlp", hidden=(128, 128), epochs=200, seed=0).fit(X, y)
+    assert reg.patience == "auto" and reg.n_val_ == 40
+    assert len(reg.history_["loss"]) < 200 and reg.stopped_epoch_ - reg.best_epoch_ == 10
+    Xc, yc = noisy()
+    clf = sc.create("mlp", epochs=15, seed=0).fit(Xc, yc)
+    assert clf.n_val_ == 0 and len(clf.history_["loss"]) == 15
+
+
+def test_patience_none_turns_the_regression_default_off():
+    X, y = noisy_regression(200)
+    m = sc.create("mlp", epochs=12, patience=None, seed=0).fit(X, y)
+    assert m.n_val_ == 0 and len(m.history_["loss"]) == 12
+
+
+def test_auto_stays_off_when_the_holdout_would_be_too_small_and_is_then_identical_to_off(recwarn):
+    X, y = noisy_regression(150)  # 10% = 15 rows < 20: too noisy to stop on
+    a = sc.create("mlp", epochs=10, seed=3).fit(X, y)
+    b = sc.create("mlp", epochs=10, patience=None, seed=3).fit(X, y)
+    assert a.n_val_ == 0 and len(a.history_["loss"]) == 10
+    assert np.array_equal(a.predict(X), b.predict(X))  # no random draw was consumed by the skipped holdout
+    assert not [w for w in recwarn if "patience" in str(w.message)]
+
+
+def test_explicit_patience_is_honoured_even_on_small_data():
+    X, y = noisy_regression(150)
+    m = sc.create("mlp", hidden=(128, 128), epochs=100, patience=5, seed=0).fit(X, y)
+    assert m.n_val_ == 15
+
+
+def test_auto_never_warns_even_without_a_usable_holdout(recwarn):
+    X, y = noisy_regression(300)
+    sc.create("mlp", epochs=3, val_split=0, seed=0).fit(X, y)        # holdout switched off
+    sc.create("mlp", epochs=3, seed=0).fit(X[:12], y[:12])           # far too few rows
+    assert not [w for w in recwarn if "patience" in str(w.message)]
+
+
+def test_patience_is_validated_and_survives_save_load(tmp_path):
+    for bad in ("yes", 0, -3, True, 2.5):
+        with pytest.raises(ValueError, match="patience"):
+            sc.create("mlp", patience=bad)
+    X, y = noisy_regression(100)
+    m = sc.create("mlp", epochs=3, seed=0).fit(X, y)
+    p = str(tmp_path / "m.pt")
+    m.save(p)
+    assert type(m).load(p).patience == "auto"
+
+
+def test_partial_fit_on_regression_never_holds_rows_out():
+    X, y = noisy_regression(400)
+    m = sc.create("mlp", seed=0)
+    m.partial_fit(X, y)
+    assert m.n_val_ == 0 and len(m.history_["loss"]) == 1
+
+
+def test_benchmark_regression_uses_its_own_validation_set_for_the_default():
+    X, y = noisy_regression(400)
+    seen = []
+
+    class Spy(sc.create("mlp").__class__):
+        def _fit(self, Xt, yt, epochs, val):
+            seen.append(None if val is None else len(val[0]))
+            return super()._fit(Xt, yt, epochs, val)
+
+    sc.benchmark({"spy": lambda s: Spy(epochs=3, seed=s)}, X, y, seeds=1, baselines=False, show=False)
+    assert seen[0] is not None and seen[0] > 20   # the harness validation rows, nothing extra carved from train

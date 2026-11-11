@@ -96,8 +96,43 @@ Note: inside `sc.benchmark` the early-stopping runs used the harness's own valid
 | random_nn | 0.483 ± 0.030 | 0.458 ± 0.027 |
 ## What follows from this
 
-1. **Early stopping stays opt-in (`patience=None` by default).** On the noisy four-class problem it cost every model accuracy (mlp -0.052, kan -0.045, rbf -0.040, random_nn -0.050 against the defaults), with small losses on `synth3` for mlp (-0.017) and random_nn (-0.011). On small noisy regression it helped a lot: `diabetes` r² mlp 0.209 -> 0.410, random_nn 0.241 -> 0.443, rbf 0.379 -> 0.431, kan 0.415 -> 0.432. On the two other regression sets it was neutral to slightly negative (mlp -0.019 and random_nn -0.016 on `linear_noisy_n300`, rbf -0.087 on `friedman1_n500`). Averaged over the three regression sets: mlp +0.062, random_nn +0.064, kan +0.010, rbf -0.011. So `patience=10` is worth trying for mlp or random_nn on small, noisy regression data, and not a safe default.
+1. **Early stopping is on by default for regression only (`patience="auto"` = 10), off for classification.** On the noisy four-class problem it cost every model accuracy (mlp -0.052, kan -0.045, rbf -0.040, random_nn -0.050 against the defaults), with small losses on `synth3` for mlp (-0.017) and random_nn (-0.011), so classification stays off. On small noisy regression it helped a lot: `diabetes` r² mlp 0.209 -> 0.410, random_nn 0.241 -> 0.443, rbf 0.379 -> 0.431, kan 0.415 -> 0.432 (section 1 and 3, validation set supplied by the harness). Section 5 measures the real default path, where the model holds out 10% of its own training rows: still large gains on `diabetes`, small losses on the smoother sets, and a clear loss on tiny data, so the automatic path requires at least 20 held-out rows.
 2. **No learning-rate default changed.** On the five classification sets the default learning rate is within 0.03 accuracy of the best of the four rates tried for every model (largest gaps: mlp 0.029 on `synth3`, rbf 0.016, random_nn 0.013, kan 0.009), which is about one seed std. `random_nn` at 3e-3 gains 0.069 r² on average over the three regression sets, but nearly all of that is `diabetes`, and it loses about 0.03 on `synth3`; one small dataset is not enough to move a default for both task types. For `rbf`, lowering the rate on regression hurts (1e-3: -0.074 on average).
 3. **Keep `rbf` and `random_nn` at their default 150 epochs.** They are designed for `lr=1e-2` and 150 epochs; forcing `epochs=80` cost `rbf` 0.027 on `synth3` and 0.018 on `hard4`. A fixed `epochs=80` for every model is part of the spread in a comparison, not a fair setup.
 4. **The `kan` / `rbf` spread you saw was not reproduced here.** On `hard4`, varying only the initialisation gives a std of 0.016 (kan) to 0.030 (random_nn); varying only the split gives 0.026 to 0.035. `kan` had the smallest spread of the four. Ranges as wide as 0.43 to 0.61 would need a much noisier test set; with few groups per split (theorem families, source images) the test composition changes a lot between seeds, which `sc.benchmark(groups=...)` will show as a large std. That is a hypothesis about your data, not something measured here.
 5. **The slow first `mlp` fit is PyTorch, not SaturnCube.** The first `torch.optim` optimizer built in a process makes PyTorch import about 900 modules lazily: roughly 1.1 to 1.3 s on a warm machine here, 15 s on a cold disk, and 0.05 ms afterwards. It happens for Adam, AdamW, SGD and RMSprop alike and `foreach=False` does not avoid it. `sc.warmup()` pays it on demand and `sc.benchmark` calls it before timing, so the first model's "fit s" is not inflated.
+
+## 5. The real default path for regression (no validation set supplied; `fit(X_train, y_train)` directly)
+
+`patience=None` against the new default (`patience="auto"`), each model's own default epochs, random 75/25 splits, target standardised before fitting, r² on the held-out quarter, 5 seeds. "val rows" is how many training rows the model held out for itself.
+
+| dataset | model | patience=None | new default | difference | val rows |
+|---|---|---|---|---|---|
+| diabetes | mlp | 0.158 ± 0.087 | 0.415 ± 0.081 | +0.256 | 33 |
+| diabetes | kan | 0.390 ± 0.048 | 0.416 ± 0.058 | +0.026 | 33 |
+| diabetes | rbf | 0.350 ± 0.063 | 0.395 ± 0.070 | +0.045 | 33 |
+| diabetes | random_nn | 0.168 ± 0.100 | 0.430 ± 0.056 | +0.262 | 33 |
+| diabetes | resnet | 0.154 ± 0.089 | 0.412 ± 0.061 | +0.258 | 33 |
+| diabetes | highway | -0.135 ± 0.180 | 0.385 ± 0.071 | +0.520 | 33 |
+| friedman1_n500 | mlp | 0.890 ± 0.020 | 0.885 ± 0.011 | -0.005 | 38 |
+| friedman1_n500 | kan | 0.902 ± 0.021 | 0.882 ± 0.029 | -0.019 | 38 |
+| friedman1_n500 | rbf | 0.846 ± 0.023 | 0.781 ± 0.037 | -0.065 | 38 |
+| friedman1_n500 | random_nn | 0.890 ± 0.025 | 0.885 ± 0.018 | -0.005 | 38 |
+| friedman1_n500 | resnet | 0.899 ± 0.017 | 0.887 ± 0.022 | -0.012 | 38 |
+| friedman1_n500 | highway | 0.912 ± 0.014 | 0.923 ± 0.009 | +0.012 | 38 |
+| friedman1_n200 | mlp | 0.623 ± 0.111 | 0.623 ± 0.111 | +0.000 | 0 |
+| friedman1_n200 | kan | 0.752 ± 0.066 | 0.752 ± 0.066 | +0.000 | 0 |
+| friedman1_n200 | rbf | 0.585 ± 0.072 | 0.585 ± 0.072 | +0.000 | 0 |
+| friedman1_n200 | random_nn | 0.677 ± 0.082 | 0.677 ± 0.082 | +0.000 | 0 |
+| friedman1_n200 | resnet | 0.725 ± 0.085 | 0.725 ± 0.085 | +0.000 | 0 |
+| friedman1_n200 | highway | 0.712 ± 0.103 | 0.712 ± 0.103 | +0.000 | 0 |
+| linear_noisy_n300 | mlp | 0.930 ± 0.007 | 0.921 ± 0.017 | -0.009 | 22 |
+| linear_noisy_n300 | kan | 0.939 ± 0.013 | 0.930 ± 0.010 | -0.009 | 22 |
+| linear_noisy_n300 | rbf | 0.953 ± 0.007 | 0.946 ± 0.008 | -0.007 | 22 |
+| linear_noisy_n300 | random_nn | 0.927 ± 0.008 | 0.925 ± 0.032 | -0.002 | 22 |
+| linear_noisy_n300 | resnet | 0.930 ± 0.011 | 0.925 ± 0.017 | -0.005 | 22 |
+| linear_noisy_n300 | highway | 0.935 ± 0.015 | 0.942 ± 0.012 | +0.007 | 22 |
+
+Mean difference over the four datasets (worst dataset): mlp +0.061 (-0.009); kan -0.001 (-0.019); rbf -0.007 (-0.065); random_nn +0.064 (-0.005); resnet +0.060 (-0.012); highway +0.135 (+0.000). The averages are dominated by `diabetes`; `kan` and `rbf` gain nothing on average.
+
+`friedman1_n200` shows `val rows` 0 because 10% of 150 training rows is 15, below the 20-row minimum, so early stopping stays off and the result equals `patience=None`. Before that guard existed the same run lost 0.14 r² for random_nn and resnet, 0.06 for highway and 0.03 for mlp. The 20-row threshold is a round number chosen after seeing this data, not a tuned value; four datasets cannot establish a better one.

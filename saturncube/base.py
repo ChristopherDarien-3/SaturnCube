@@ -13,6 +13,7 @@ from .optim import make_optimizer
 
 REGISTRY: dict = {}
 _WARMED = False
+AUTO_MIN_VAL_ROWS = 20  # patience='auto' needs at least this many held-out rows, else it stays off
 
 
 def warmup():
@@ -89,13 +90,17 @@ class BaseModel:
 
     def __init__(self, input_dim=None, output_dim=None, task="auto", lr=None,
                  epochs=60, batch_size=64, weight_decay=0.0, normalize=True,
-                 patience=None, device=None, seed=None, verbose=False,
+                 patience="auto", device=None, seed=None, verbose=False,
                  optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None, val_split=0.1):
         if task not in ("auto", "classification", "regression"):
             raise ValueError("task must be 'auto', 'classification' or 'regression'")
         self.input_dim, self.output_dim, self.task = input_dim, output_dim, task
         self.lr, self.epochs, self.batch_size = lr, epochs, batch_size
         self.weight_decay, self.normalize = weight_decay, normalize
+        if not (patience is None or patience == "auto" or (isinstance(patience, (int, np.integer))
+                                                          and not isinstance(patience, bool) and patience >= 1)):
+            raise ValueError("patience must be None (off), 'auto' (10 for regression, off for classification) "
+                             "or a positive integer")
         self.patience, self.verbose = patience, verbose
         if not 0 <= val_split < 0.5:
             raise ValueError("val_split must be in [0, 0.5)")
@@ -241,14 +246,24 @@ class BaseModel:
 
     _auto_val = True
 
-    def _holdout(self, Xt, yt):
+    def _patience(self):
+        """Epochs without validation improvement before stopping: the given value; for 'auto', 10 on regression
+        and off (None) on classification. Valid once the task is known (after the first fit starts)."""
+        if self.patience == "auto":
+            return 10 if self.task == "regression" else None
+        return self.patience
+
+    def _holdout(self, Xt, yt, loud=True, min_val=0):
         """Hold val_split of the rows out for early stopping: (Xtrain, ytrain, (Xval, yval)) or None if impossible.
         Classification is stratified (every class keeps at least one training row); the draw uses torch's RNG, so
         it follows `seed`."""
         n = len(Xt)
+        if min_val and n * self.val_split < min_val:  # too small to be a trustworthy stopping signal: draw nothing
+            return None
         if n < 20:
-            warnings.warn("only %d rows: too few for an automatic validation split, so patience has no effect" % n,
-                          stacklevel=4)
+            if loud:
+                warnings.warn("only %d rows: too few for an automatic validation split, so patience has no effect"
+                              % n, stacklevel=4)
             return None
         if self.task == "classification" and yt.dim() == 1:
             parts = []
@@ -260,7 +275,8 @@ class BaseModel:
         else:
             val_idx = torch.randperm(n, device=Xt.device)[:max(1, int(round(n * self.val_split)))]
         if len(val_idx) == 0:
-            warnings.warn("no rows could be held out for validation, so patience has no effect", stacklevel=4)
+            if loud:
+                warnings.warn("no rows could be held out for validation, so patience has no effect", stacklevel=4)
             return None
         keep = torch.ones(n, dtype=torch.bool, device=Xt.device)
         keep[val_idx] = False
@@ -268,12 +284,14 @@ class BaseModel:
 
     def _fit(self, Xt, yt, epochs, val):
         m = self._module
-        if val is None and self.patience is not None and self._auto_val:
+        patience = self._patience()
+        explicit = self.patience != "auto"  # the default 'auto' never warns; an explicit request does
+        if val is None and patience is not None and self._auto_val:
             if self.val_split:
-                held = self._holdout(Xt, yt)
+                held = self._holdout(Xt, yt, loud=explicit, min_val=0 if explicit else AUTO_MIN_VAL_ROWS)
                 if held is not None:
                     Xt, yt, val = held
-            else:
+            elif explicit:
                 warnings.warn("patience has no effect without validation data: pass val_data= or set val_split > 0",
                               stacklevel=3)
         self.n_val_, self.best_epoch_ = (0 if val is None else len(val[0])), None
@@ -296,13 +314,13 @@ class BaseModel:
                 with torch.no_grad():
                     v = self._loss(self._outputs(val[0]), val[1]).item()
                 self.history_["val_loss"].append(v)
-                if self.patience is not None:
+                if patience is not None:
                     if v < best - 1e-9:
                         best, wait, self.best_epoch_ = v, 0, ep
                         best_state = {k: t.clone() for k, t in m.state_dict().items()}
                     else:
                         wait += 1
-                        if wait >= self.patience:
+                        if wait >= patience:
                             break
             if self.verbose and (ep % max(1, epochs // 10) == 0 or ep == epochs - 1):
                 msg = f"epoch {ep + 1}/{epochs} loss={self.history_['loss'][-1]:.4f}"

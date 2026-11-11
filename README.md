@@ -37,7 +37,7 @@ PyTorch, install `torch` first following https://pytorch.org, then install Satur
 From source:
 
 ```bash
-git clone https://github.com/ChristopherDarien-3/SaturnCube
+git clone <this repository>
 cd saturncube
 pip install -e ".[dev]"
 ```
@@ -111,7 +111,7 @@ print(result.to_rows()[0])      # raw numbers; also result.scores[model][metric]
   (logistic or ridge regression) are added automatically; `baselines=False` turns them off. scikit-learn is optional
   (`pip install saturncube[bench]`); without it only the first baseline runs and the table says so.
 - **Same data for everyone.** Every model and baseline trains on the same training rows, and the test rows are never
-  passed to `fit()`. The validation part goes to `fit(val_data=...)` for models that accept it, so `patience=` works inside `sc.benchmark` using that split. For regression, models
+  passed to `fit()`. The validation part goes to `fit(val_data=...)` for models that accept it, so `patience=` (including the regression default) works inside `sc.benchmark` using that split. For regression, models
   are trained on a standardised target and scored on the original scale.
 - **Failures are recorded, not hidden.** A model that raises on a seed shows up in the table's notes; a misspelled name
   raises immediately. Models can be given as registry names, `(name, kwargs)`, classes, `{label: ...}` dicts, or a
@@ -200,12 +200,20 @@ model.module            # plain torch.nn.Module
 
 Shared training options (all models): `lr`, `epochs`, `batch_size`, `weight_decay`, `normalize`, `patience`, `device`, `seed`, `verbose`, `val_split`.
 
-`patience=k` stops when the validation loss has not improved for `k` epochs and restores the best weights. If you do not pass
-`val_data=`, the model holds out `val_split` (default 0.1, stratified for classification) of the training rows for this, so
-`patience` always has something to monitor; `val_split=0` turns the holdout off, and `patience` then warns that it does nothing.
-After `fit`, `n_val_`, `best_epoch_` and `stopped_epoch_` say what happened. Early stopping is off by default: in our checks it
-helped small noisy regression and hurt noisy classification, and no default learning rate or epoch count was changed
-(numbers and caveats in [docs/TUNING.md](docs/TUNING.md)).
+`patience` is early stopping: training stops when the validation loss has not improved for that many epochs, and the best
+weights are restored. The default, `patience="auto"`, means **10 for regression and off for classification**; `patience=None`
+turns it off and an integer sets it yourself. If you do not pass `val_data=`, the model holds out `val_split` (default 0.1,
+stratified for classification) of the training rows for this. The automatic default only applies when that holdout has at least
+20 rows (about 200 training rows); below that a validation loss is mostly noise and early stopping stays off, silently. An
+explicit `patience=k` always applies, and with `val_split=0` it warns that it has nothing to monitor. After `fit`, `n_val_`,
+`best_epoch_` and `stopped_epoch_` say what happened. `partial_fit` never holds rows out.
+
+Why regression only: on small noisy regression sets the models overfit badly without it (`diabetes` r²: `mlp` 0.16 -> 0.42,
+`highway` -0.14 -> 0.39), while on noisy classification early stopping cost 0.04 to 0.05 accuracy. It is not free on
+regression either: it takes 10% of the rows away from training and gave small losses on some smoother sets (up to -0.065 for
+`rbf`). Numbers and caveats are in [docs/TUNING.md](https://github.com/ChristopherDarien-3/SaturnCube/blob/HEAD/docs/TUNING.md). Fits that used to train for the full `epochs` on
+regression data now may stop early; pass `patience=None` to get the old behaviour. No default learning rate or epoch count was
+changed.
 
 The first fit in a process is slow (about a second here, 10-20 s on a cold disk) because PyTorch imports its optimizer machinery
 lazily. Call `sc.warmup()` once before timing anything; `sc.benchmark` does it for you.

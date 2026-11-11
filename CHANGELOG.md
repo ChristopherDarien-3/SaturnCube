@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- **Behaviour change:** `patience` now defaults to `"auto"`: 10 for regression, off for classification. Regression fits that used to
+  run all `epochs` now hold out `val_split` (10%) of the training rows and may stop early with the best weights restored. The
+  automatic default needs at least 20 held-out rows (`AUTO_MIN_VAL_ROWS`) and never warns; `patience=None` restores the old behaviour.
 - `patience` now always has data to monitor: without `val_data=`, models hold out `val_split` (default 0.1, stratified for
   classification) of the training rows; `val_split=0` disables it and `patience` warns. New attributes `n_val_`, `best_epoch_`,
   `stopped_epoch_`. `partial_fit` never holds rows out. Early stopping is still off by default.
