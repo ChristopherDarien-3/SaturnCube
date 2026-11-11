@@ -6,7 +6,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: pypi            # create this environment in the repo settings
+    environment: testpypi            # create this environment in the repo settings
     permissions:
       id-token: write            # PyPI "trusted publishing": no API token is stored in the repo
     steps:
