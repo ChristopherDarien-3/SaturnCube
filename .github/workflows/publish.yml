@@ -1,5 +1,7 @@
+name: Publish to PyPI
 
-name: Publish to TestPyPI
+# Runs when you publish a GitHub release. PyPI trusted publisher settings:
+#   workflow publish.yml, environment pypi
 
 on:
   release:
@@ -10,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
 
     environment:
-      name: testpypi
+      name: pypi
 
     permissions:
       contents: read
-      id-token: write
+      id-token: write            # trusted publishing: no API token is stored in the repository
 
     steps:
       - name: Checkout repository
@@ -34,7 +36,5 @@ jobs:
       - name: Check package
         run: python -m twine check dist/*
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
