@@ -1,0 +1,16 @@
+numpy>=1.22
+torch>=2.0
+
+[bench]
+scikit-learn>=1.0
+
+[data]
+pandas>=1.5
+
+[dev]
+pytest>=7
+scipy
+pandas>=1.5
+scikit-learn>=1.0
+build
+twine
