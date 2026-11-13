@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.7, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between 0.x releases.
+> **Status: v0.7, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between releases.
 
 ## Why
 
