@@ -4,7 +4,7 @@ name: Publish to PyPI
 #   workflow publish.yml, environment pypi
 
 on:
-  release:
+  release: 
     types: [published]
 
 jobs:
