@@ -123,8 +123,8 @@ def test_majority_baseline_equals_train_majority_share_on_test():
     for i, seed in enumerate(res.seeds):
         s = res.splits[seed]
         major = np.bincount(y[s["train"]]).argmax()
-        assert res.scores["majority class"]["accuracy"][i] == pytest.approx(np.mean(y[s["test"]] == major))
-    assert res.baselines == ["majority class", "scaled logistic regression"]
+        assert res.scores["class prior"]["accuracy"][i] == pytest.approx(np.mean(y[s["test"]] == major))
+    assert res.baselines == ["class prior", "scaled logistic regression"]
 
 
 def test_baselines_false_adds_nothing():
@@ -153,7 +153,7 @@ def test_missing_sklearn_is_reported_not_fatal(monkeypatch):
     monkeypatch.setattr(ev, "_sklearn_baseline", lambda task: None)
     X, y, groups = clustered(G=12, per=10)
     res = sc.benchmark({"spy": lambda s: Spy()}, X, y, groups=groups, seeds=2, show=False)
-    assert res.baselines == ["majority class"]
+    assert res.baselines == ["class prior"]
     assert "scikit-learn is not installed" in str(res)
 
 
@@ -225,7 +225,7 @@ def test_failing_model_is_recorded_and_others_still_run():
                        seeds=3, show=False)
     assert len(res.errors["broken"]) == 3 and "boom" in res.errors["broken"][0][1]
     assert np.isfinite(res.scores["naive_bayes"]["accuracy"]).all()
-    assert "broken failed on 3/3 seeds" in str(res)
+    assert "broken failed on 3/3 runs" in str(res)
     assert res.to_rows()[-1]["model"] == "broken"  # failed models sort last
 
 
@@ -288,7 +288,7 @@ def test_task_override_and_float_labels():
     y = (X[:, 0] > 0).astype(float)
     res = sc.benchmark({"spy": lambda s: Spy()}, X, y, seeds=2, task="classification", show=False)
     assert res.task == "classification" and "accuracy" in res.scores["spy"]
-    assert 0.3 < res.scores["majority class"]["accuracy"].mean() < 0.7
+    assert 0.3 < res.scores["class prior"]["accuracy"].mean() < 0.7
 
 
 def test_table_output_and_show_flag(capsys):

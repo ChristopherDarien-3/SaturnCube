@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import difflib
 import inspect
-import time
+import time as time_
 import warnings
 
 import numpy as np
 
 from .base import REGISTRY, BaseModel, warmup
+from .calibration import (_reliability_rows, brier_score, expected_calibration_error, format_reliability, log_loss,
+                          reliability_table)
 from .data import split_indices
 
-CLASSIFICATION_METRICS = ("accuracy", "balanced_accuracy", "macro_f1")
+CLASSIFICATION_METRICS = ("accuracy", "balanced_accuracy", "macro_f1", "log_loss", "brier", "ece")
 REGRESSION_METRICS = ("r2", "rmse", "mae")
-_LOWER_IS_BETTER = {"rmse", "mae"}
+_LOWER_IS_BETTER = {"rmse", "mae", "log_loss", "brier", "ece"}
 
 
 # ----------------------------------------------------------------------------- input checks ---
@@ -119,6 +121,56 @@ def _make_split(groups, y, task, test_size, val_size, seed):
     return np.asarray(tr, dtype=int), np.asarray(va, dtype=int), np.asarray(te, dtype=int)
 
 
+def _rows_of(value, n, name):
+    if isinstance(value, (float, np.floating)) and 0 < value < 1:
+        return max(1, int(round(n * value)))
+    if isinstance(value, (int, np.integer)) and not isinstance(value, bool) and value >= 0:
+        return int(value)
+    if value == 0:
+        return 0
+    raise ValueError("%s must be a fraction in (0, 1) of the rows or a whole number of rows" % name)
+
+
+def walk_forward_splits(n, n_folds=5, test_size=0.1, val_size=0.1, purge=0, embargo=0, window=None, min_train=10):
+    """Walk-forward (forward-chaining) folds over n time-ordered rows: a list of dicts with row positions
+    ``train``, ``val`` and ``test``. The test blocks are consecutive and cover the last ``n_folds * test_size`` of
+    the series; each fold trains on the past only:
+
+        |<- train ->| purge |<- val ->| purge |<- test ->|   (then the next fold's blocks slide forward)
+
+    test_size, val_size  a fraction of n, or a number of rows (val_size 0 gives no validation block).
+    purge     rows dropped before the validation block and before the test block. If a row's features look back
+              ``window`` rows and its label looks ahead ``horizon`` rows, use purge >= window + horizon - 1, otherwise
+              the last training rows share bars with the first validation or test rows.
+    embargo   rows dropped from every later fold's train and validation sets, directly after each earlier test block
+              (a conservative extra on top of purge; 0 disables it).
+    window    None: expanding training window. An int: only the last ``window`` rows before the purge gap (rolling).
+    """
+    if n_folds < 1:
+        raise ValueError("n_folds must be at least 1")
+    if purge < 0 or embargo < 0 or (window is not None and window < 1):
+        raise ValueError("purge and embargo must be >= 0 and window None or >= 1")
+    length, val_rows = _rows_of(test_size, n, "test_size"), _rows_of(val_size, n, "val_size")
+    ends = [n - (n_folds - j) * length + length for j in range(n_folds)]  # end of each fold's test block
+    folds = []
+    for k in range(n_folds):
+        t0, t1 = ends[k] - length, ends[k]
+        v1 = t0 - purge
+        v0 = v1 - val_rows
+        train_end = (v0 - purge) if val_rows else (t0 - purge)
+        train_start = 0 if window is None else max(0, train_end - window)
+        if train_end - train_start < min_train:
+            raise ValueError("fold %d would train on only %d rows (need %d): %d folds of %d test rows, validation %d "
+                             "rows and purge %d leave too little history; use fewer folds, a smaller test_size or "
+                             "less purge" % (k, max(0, train_end - train_start), min_train, n_folds, length, val_rows, purge))
+        train, val = np.arange(train_start, train_end), (np.arange(v0, v1) if val_rows else np.arange(0))
+        if embargo and k:
+            banned = np.concatenate([np.arange(ends[j], ends[j] + embargo) for j in range(k)])
+            train, val = np.setdiff1d(train, banned), np.setdiff1d(val, banned)
+        folds.append({"train": train, "val": val, "test": np.arange(t0, t1)})
+    return folds
+
+
 # ---------------------------------------------------------------------------------- metrics ---
 def _classification_metrics(y, p):
     acc = float(np.mean(p == y))
@@ -133,6 +185,11 @@ def _classification_metrics(y, p):
     return {"accuracy": acc, "balanced_accuracy": float(np.mean(recalls)), "macro_f1": float(np.mean(f1s))}
 
 
+def _proba_metrics(y, proba, classes):
+    return {"log_loss": log_loss(y, proba, classes), "brier": brier_score(y, proba, classes),
+            "ece": expected_calibration_error(y, proba, classes=classes)}
+
+
 def _regression_metrics(y, p):
     y, p = y.astype(float), np.asarray(p, dtype=float).reshape(len(y))
     err = p - y
@@ -143,7 +200,8 @@ def _regression_metrics(y, p):
 
 # ------------------------------------------------------------------------------- baselines ---
 class _Majority:
-    """Predicts the most frequent training class (classification) or the training mean (regression)."""
+    """Classification: predicts the most frequent training class and gives the training class frequencies as its
+    probabilities (the class-prior baseline). Regression: predicts the training mean."""
 
     def __init__(self, task):
         self.task = task
@@ -153,11 +211,15 @@ class _Majority:
             self.value_ = float(np.mean(y))
         else:
             vals, counts = np.unique(y, return_counts=True)
+            self.classes_, self.prior_ = vals, counts / counts.sum()
             self.value_ = vals[int(np.argmax(counts))]
         return self
 
     def predict(self, X):
         return np.full(len(X), self.value_)
+
+    def predict_proba(self, X):
+        return np.tile(self.prior_, (len(X), 1))
 
 
 class _Flat:
@@ -172,6 +234,13 @@ class _Flat:
 
     def predict(self, X):
         return self.est.predict(X.reshape(len(X), -1))
+
+    def predict_proba(self, X):
+        return self.est.predict_proba(X.reshape(len(X), -1))
+
+    @property
+    def classes_(self):
+        return self.est.classes_
 
 
 def _sklearn_baseline(task):
@@ -282,20 +351,37 @@ def _fmt(mean, std, metric):
 
 
 class BenchmarkResult:
-    """What sc.benchmark returns. print(result) shows the table; the raw numbers are kept per seed.
+    """What sc.benchmark returns. print(result) shows the table; the raw numbers are kept per run.
 
-    Attributes: task, metric, seeds, scores {label: {metric: array per seed, NaN where a run failed}},
-    fit_seconds {label: array}, errors {label: [(seed, message)]}, baselines (labels), splits
-    {seed: {"train", "val", "test"} row indices}, grouped (bool), notes (list of str).
+    A run is one model fitted on one split with one seed. Runs are grouped into units: a seed for random and grouped
+    splits, a fold for walk-forward (the seeds inside a fold are averaged first). The table's mean ± std is over units.
+
+    Attributes: task, metric, seeds, scores {label: {metric: array per run, NaN where a run failed or the model has no
+    predict_proba}}, fit_seconds {label: array}, errors {label: [(seed, message)]}, baselines (labels), splits
+    {seed (or fold index for walk-forward): {"train", "val", "test"} row indices}, grouped (bool), notes (list of str),
+    run_units, walk (walk-forward settings or None), predictions {label: [{"y", "proba", "classes"} per run]}.
+    Methods: to_rows(), to_dataframe(), fold_table() (walk-forward), reliability(label).
     """
 
     def __init__(self, task, metric, seeds, labels, baselines, scores, fit_seconds, errors, splits,
-                 grouped, n_groups, shape, notes, majority_share=None):
+                 grouped, n_groups, shape, notes, majority_share=None, *, run_units=None, walk=None, predictions=None):
         self.task, self.metric, self.seeds = task, metric, seeds
         self.labels, self.baselines = labels, baselines
         self.scores, self.fit_seconds, self.errors = scores, fit_seconds, errors
         self.splits, self.grouped, self.n_groups = splits, grouped, n_groups
         self.shape, self.notes, self.majority_share = shape, notes, majority_share
+        n_runs = len(next(iter(fit_seconds.values()))) if fit_seconds else 0
+        self.run_units = np.arange(n_runs) if run_units is None else np.asarray(run_units)
+        self.walk = walk
+        self.predictions = predictions or {}
+
+    @property
+    def n_runs(self):
+        return len(self.run_units)
+
+    @property
+    def units(self):
+        return list(dict.fromkeys(self.run_units.tolist()))
 
     @property
     def secondary(self):
@@ -303,29 +389,35 @@ class BenchmarkResult:
             return "balanced_accuracy" if self.metric != "balanced_accuracy" else "accuracy"
         return "rmse" if self.metric != "rmse" else "r2"
 
+    def _unit_values(self, label, metric):
+        """One value per unit: the mean over the runs of that unit (a seed, or the seeds of one fold)."""
+        arr = self.scores[label][metric]
+        return np.array([_mean(arr[self.run_units == u]) for u in self.units])
+
     def _delta(self, label, ref):
         sign = -1.0 if self.metric in _LOWER_IS_BETTER else 1.0
-        d = sign * (self.scores[label][self.metric] - self.scores[ref][self.metric])
+        d = sign * (self._unit_values(label, self.metric) - self._unit_values(ref, self.metric))
         return d[np.isfinite(d)]
 
     def _best_baseline(self):
-        cands = [b for b in self.baselines if np.isfinite(_mean(self.scores[b][self.metric]))]
+        cands = [b for b in self.baselines if np.isfinite(_mean(self._unit_values(b, self.metric)))]
         if not cands:
             return None
         sign = -1.0 if self.metric in _LOWER_IS_BETTER else 1.0
-        return max(cands, key=lambda b: sign * _mean(self.scores[b][self.metric]))
+        return max(cands, key=lambda b: sign * _mean(self._unit_values(b, self.metric)))
 
     def to_rows(self):
-        """One dict per model, best first (failed models last)."""
+        """One dict per model, best first (failed models last). Means and stds are over units."""
         ref = self._best_baseline()
         sign = -1.0 if self.metric in _LOWER_IS_BETTER else 1.0
         rows = []
         for label in self.labels:
             row = {"model": label, "baseline": label in self.baselines,
-                   "n_ok": int(np.isfinite(self.scores[label][self.metric]).sum()), "n_seeds": len(self.seeds),
-                   "fit_seconds": _mean(self.fit_seconds[label])}
+                   "n_ok": int(np.isfinite(self.scores[label][self.metric]).sum()), "n_runs": self.n_runs,
+                   "n_seeds": len(self.seeds), "fit_seconds": _mean(self.fit_seconds[label])}
             for m in self.scores[label]:
-                row[m + "_mean"], row[m + "_std"] = _mean(self.scores[label][m]), _std(self.scores[label][m])
+                uv = self._unit_values(label, m)
+                row[m + "_mean"], row[m + "_std"] = _mean(uv), _std(uv)
             row["delta_mean"] = row["delta_std"] = float("nan")
             if ref is not None and label != ref and label not in self.baselines:
                 d = self._delta(label, ref)
@@ -340,15 +432,52 @@ class BenchmarkResult:
         import pandas as pd
         return pd.DataFrame(self.to_rows())
 
+    def fold_table(self, metric=None):
+        """Walk-forward only: one row per model, one column per fold (the mean over that fold's seeds), then the
+        mean ± std across folds, which is the spread across periods."""
+        if self.walk is None:
+            raise ValueError("fold_table() is for benchmark(..., split='walk_forward')")
+        m = metric or self.metric
+        if m not in next(iter(self.scores.values())):
+            raise ValueError("unknown metric %r" % m)
+        units = self.units
+        order = [r["model"] for r in self.to_rows()]
+        head = ["model"] + ["fold %d" % u for u in units] + [m + " mean ± std"]
+        body = []
+        for label in order:
+            uv = self._unit_values(label, m)
+            body.append([label + (" (baseline)" if label in self.baselines else "")]
+                        + [("%.4g" % v) if np.isfinite(v) else "n/a" for v in uv] + [_fmt(_mean(uv), _std(uv), m)])
+        widths = [max(len(c[i]) for c in [head] + body) for i in range(len(head))]
+        line = lambda cells: "  ".join(c.ljust(w) if i == 0 else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
+        return "\n".join([line(head), "  ".join("-" * w for w in widths)] + [line(c) for c in body])
+
+    def reliability(self, label, bins=10):
+        """Top-label reliability table for one model, pooled over all runs (list of dicts; see
+        sc.format_reliability). Needs a classifier with predict_proba."""
+        runs = self.predictions.get(label)
+        if not runs:
+            raise ValueError("no stored probabilities for %r (regression, no predict_proba, keep_predictions=False, "
+                             "or every run failed)" % label)
+        conf, ok = [], []
+        for r in runs:
+            p = np.asarray(r["proba"], dtype=float)
+            idx = np.searchsorted(np.asarray(r["classes"]), np.asarray(r["y"]))
+            conf.append(p.max(axis=1))
+            ok.append(p.argmax(axis=1) == idx)
+        return _reliability_rows(np.concatenate(conf), np.concatenate(ok), bins)
+
     def table(self):
         rows, ref = self.to_rows(), self._best_baseline()
         m1, m2 = self.metric, self.secondary
+        extra = ["log_loss"] if (self.task == "classification" and m1 != "log_loss" and m2 != "log_loss"
+                                 and any(np.isfinite(r["log_loss_mean"]) for r in rows)) else []
         show_delta = ref is not None
-        head = ["model", m1, m2] + (["vs best baseline"] if show_delta else []) + ["fit s", "ok"]
+        head = ["model", m1, m2] + extra + (["vs best baseline"] if show_delta else []) + ["fit s", "ok"]
         body, any_noise = [], False
         for r in rows:
             name = r["model"] + (" (baseline)" if r["baseline"] else "")
-            cells = [name, _fmt(r[m1 + "_mean"], r[m1 + "_std"], m1), _fmt(r[m2 + "_mean"], r[m2 + "_std"], m2)]
+            cells = [name] + [_fmt(r[m + "_mean"], r[m + "_std"], m) for m in [m1, m2] + extra]
             if show_delta:
                 if np.isfinite(r["delta_mean"]):
                     txt = ("%+.3f" if m1 not in _LOWER_IS_BETTER else "%+.4g") % r["delta_mean"]
@@ -361,7 +490,7 @@ class BenchmarkResult:
                 else:
                     cells.append("-")
             cells += ["%.2f" % r["fit_seconds"] if np.isfinite(r["fit_seconds"]) else "-",
-                      "%d/%d" % (r["n_ok"], r["n_seeds"])]
+                      "%d/%d" % (r["n_ok"], r["n_runs"])]
             body.append(cells)
         widths = [max(len(c[i]) for c in [head] + body) for i in range(len(head))]
         line = lambda cells: "  ".join(c.ljust(w) if i == 0 else c.rjust(w)
@@ -369,73 +498,120 @@ class BenchmarkResult:
         n_tr = np.mean([len(s["train"]) for s in self.splits.values()])
         n_va = np.mean([len(s["val"]) for s in self.splits.values()])
         n_te = np.mean([len(s["test"]) for s in self.splits.values()])
-        out = ["SaturnCube benchmark: %s, %d rows, %d seed%s" % (
-            self.task, self.shape[0], len(self.seeds), "" if len(self.seeds) == 1 else "s")]
-        if self.grouped:
-            out.append("split: group-disjoint over %d groups; per seed about train %d / val %d / test %d rows"
-                       % (self.n_groups, round(n_tr), round(n_va), round(n_te)))
+        sizes = "train %d / val %d / test %d rows" % (round(n_tr), round(n_va), round(n_te))
+        if self.walk:
+            w = self.walk
+            out = ["SaturnCube benchmark: %s, %d rows, walk-forward %d folds x %d seed%s" % (
+                self.task, self.shape[0], w["n_folds"], len(self.seeds), "" if len(self.seeds) == 1 else "s")]
+            out.append("split: %s window, purge %d, embargo %d; per fold about %s; each fold trains only on the past"
+                       % ("expanding" if w["window"] is None else "rolling (%d rows)" % w["window"], w["purge"],
+                          w["embargo"], sizes))
         else:
-            out.append("split: random rows, NOT grouped (train %d / val %d / test %d). If rows share a source "
-                       "(patches of one image, repeated measurements) pass groups= or scores may be inflated."
-                       % (round(n_tr), round(n_va), round(n_te)))
+            out = ["SaturnCube benchmark: %s, %d rows, %d seed%s" % (
+                self.task, self.shape[0], len(self.seeds), "" if len(self.seeds) == 1 else "s")]
+            if self.grouped:
+                out.append("split: group-disjoint over %d groups; per seed about %s" % (self.n_groups, sizes))
+            else:
+                out.append("split: random rows, NOT grouped (%s). If rows share a source (patches of one image, "
+                           "repeated measurements) pass groups= or scores may be inflated; for time series use "
+                           "split='walk_forward'." % sizes)
         if self.majority_share is not None:
             out.append("largest class = %.1f%% of all rows" % (100 * self.majority_share))
         out += ["", line(head), "  ".join("-" * w for w in widths)] + [line(c) for c in body]
-        foot = ["std is over seeds (each seed changes the split and the model initialisation)"]
+        if self.walk:
+            foot = ["std is over folds (each fold's value is the mean over its seeds): the spread across periods; "
+                    "result.fold_table() shows every fold"]
+        else:
+            foot = ["std is over seeds (each seed changes the split and the model initialisation)"]
         if any_noise:
-            foot.append("~ = difference within seed noise (|mean| <= std of the paired difference)")
+            foot.append("~ = difference within noise (|mean| <= std of the paired difference)")
+        if self.task == "classification" and self.predictions:
+            foot.append("result.reliability(model) gives the calibration table; log_loss, brier and ece need predict_proba")
         foot += self.notes
         for label, errs in self.errors.items():
             if errs:
-                foot.append("%s failed on %d/%d seeds, e.g. %s" % (label, len(errs), len(self.seeds), errs[0][1]))
+                foot.append("%s failed on %d/%d runs, e.g. %s" % (label, len(errs), self.n_runs, errs[0][1]))
         return "\n".join(out + [""] + foot)
 
     def __str__(self):
         return self.table()
 
     def __repr__(self):
-        return "<BenchmarkResult %s, %d models, %d seeds>" % (self.task, len(self.labels), len(self.seeds))
+        return "<BenchmarkResult %s, %d models, %d runs>" % (self.task, len(self.labels), self.n_runs)
 
 
 # ------------------------------------------------------------------------------------- main ---
 def benchmark(models, X, y, groups=None, seeds=5, baselines=True, *, task="auto", metric=None,
-              test_size=0.25, val_size=0.15, epochs=None, scale_target=True, show=True):
+              test_size=None, val_size=None, epochs=None, scale_target=True, show=True,
+              split="auto", n_folds=5, purge=0, embargo=0, window=None, time=None, keep_predictions=True):
     """Compare models fairly and print a table.
 
     models     registry names ("mlp"), (name, kwargs) tuples, model classes, functions seed -> fresh model, or a
-               dict {label: any of those}. A fresh model is built for every seed and receives seed=<seed>.
+               dict {label: any of those}. A fresh model is built for every run and receives seed=<seed>.
     X, y       numeric features (n, ...) and a 1-D target. Integer / bool / string y is classification,
                float y is regression (override with task=).
     groups     one group id per row. Whole groups go to train, validation or test, so rows from the same source
                never straddle the split. None means random rows, which the table flags as possibly leaky.
-    seeds      an int (seeds 0..n-1) or a list of ints. Each seed changes the split and the model init.
-    baselines  adds a majority-class (classification) or train-mean (regression) guess and a standardised
-               scikit-learn linear model (logistic / ridge). scikit-learn is optional: if it is missing the
-               second baseline is skipped and the table says so (pip install saturncube[bench]).
-    metric     ranking metric: accuracy / balanced_accuracy / macro_f1, or r2 / rmse / mae.
-    test_size, val_size   row fractions (groups are added until the fraction is reached, so actual sizes vary).
-               The validation part is passed as val_data to models whose fit() accepts it; every model and
-               baseline trains on the same training rows only.
+    seeds      an int (seeds 0..n-1) or a list of ints. Each seed changes the model init (and, for random and grouped
+               splits, the split).
+    baselines  adds a class-prior (classification: predicts the most frequent class and gives the training class
+               frequencies as probabilities) or train-mean (regression) baseline and a standardised scikit-learn
+               linear model (logistic / ridge). scikit-learn is optional: if it is missing the second baseline is
+               skipped and the table says so (pip install saturncube[bench]).
+    metric     ranking metric. Classification: accuracy, balanced_accuracy, macro_f1, or the probability metrics
+               log_loss, brier, ece (lower is better; models without predict_proba score n/a). Regression: r2,
+               rmse, mae.
+    split      "auto" (grouped if groups is given, else random), "random", "grouped", or "walk_forward" for time
+               series: n_folds forward-chaining folds over the rows in order (or ordered by time=), each trained on
+               the past only. purge drops that many rows before the validation and test blocks (use at least
+               window + horizon - 1 for windowed features and forward labels); embargo drops rows after earlier test
+               blocks from later training sets; window=None grows the training set, window=k keeps the last k rows.
+               The table's std is then over folds, and result.fold_table() lists every fold.
+    test_size, val_size   row fractions per split (defaults 0.25 / 0.15; walk-forward: per fold, 0.1 / 0.1). Groups
+               are added until the fraction is reached, so actual sizes vary. The validation part is passed as
+               val_data to models whose fit() accepts it; every model and baseline trains on the same training rows.
     epochs     overrides fit(epochs=...) for models that accept it.
-    scale_target   regression only: models train on a standardised target and are scored on the original scale
-               (models do not standardise targets themselves). Baselines always use the raw target.
+    scale_target   regression only: models train on a standardised target and are scored on the original scale.
+    keep_predictions   keep each classifier's test probabilities in result.predictions (used by result.reliability()).
     show       print the table (the result is returned either way).
 
-    Returns a BenchmarkResult. A model that fails on a seed is recorded, not fatal; a misspelled model name or
+    Returns a BenchmarkResult. A model that fails on a run is recorded, not fatal; a misspelled model name or
     invalid data raises immediately.
     """
     X, y, groups, task = _check_inputs(X, y, groups, task)
+    if split not in ("auto", "random", "grouped", "walk_forward"):
+        raise ValueError("split must be 'auto', 'random', 'grouped' or 'walk_forward'")
+    if split == "auto":
+        split = "grouped" if groups is not None else "random"
+    wf = split == "walk_forward"
+    if split == "grouped" and groups is None:
+        raise ValueError("split='grouped' needs groups=")
+    if split == "random" and groups is not None:
+        raise ValueError("split='random' ignores groups; use split='grouped' (or leave split on 'auto')")
+    if wf and groups is not None:
+        raise ValueError("walk-forward folds are ordered in time and cannot be combined with groups=")
+    if not wf and (purge or embargo or window is not None or time is not None):
+        raise ValueError("purge, embargo, window and time are only used with split='walk_forward'")
+    order = np.arange(len(y))
+    if time is not None:
+        time = np.asarray(time)
+        if len(time) != len(y):
+            raise ValueError("time must have one entry per row (%d); got %d" % (len(y), len(time)))
+        order = np.argsort(time, kind="stable")
+        X, y = X[order], y[order]
+    test_size = (0.1 if wf else 0.25) if test_size is None else test_size
+    val_size = (0.1 if wf else 0.15) if val_size is None else val_size
     valid = CLASSIFICATION_METRICS if task == "classification" else REGRESSION_METRICS
     metric = metric or valid[0]
     if metric not in valid:
         raise ValueError("metric %r is not valid for %s; choose from %s" % (metric, task, valid))
-    if not (0 < test_size < 1 and 0 <= val_size < 1 and test_size + val_size < 1):
+    if not wf and not (0 < test_size < 1 and 0 <= val_size < 1 and test_size + val_size < 1):
         raise ValueError("need 0 < test_size < 1, 0 <= val_size < 1 and test_size + val_size < 1")
     seed_list = _seed_list(seeds)
     entries = [(label, factory, False) for label, factory in _normalise_models(models, task)]
     notes = []
     if baselines:
-        entries.append(("majority class" if task == "classification" else "train mean",
+        entries.append(("class prior" if task == "classification" else "train mean",
                         lambda seed: _Majority(task), True))
         sk = _sklearn_baseline(task)
         if sk is None:
@@ -449,21 +625,39 @@ def benchmark(models, X, y, groups=None, seeds=5, baselines=True, *, task="auto"
         entries = [(l if not b else l + " [baseline]", f, b) for l, f, b in entries]
         names = [e[0] for e in entries]
 
+    # ---- the runs: (unit, split key, seed, (train, val, test)); seeds of one fold share a unit
+    splits, jobs, walk = {}, [], None
+    if wf:
+        folds = walk_forward_splits(len(y), n_folds, test_size, val_size, purge, embargo, window)
+        all_classes = set(np.unique(y).tolist()) if task == "classification" else None
+        for fi, f in enumerate(folds):
+            if all_classes is not None and set(np.unique(y[f["train"]]).tolist()) != all_classes:
+                raise ValueError("fold %d: the training window is missing class(es) %s; use a longer first window "
+                                 "(fewer folds or a smaller test_size)" % (fi, sorted(all_classes - set(np.unique(y[f["train"]]).tolist()))))
+            splits[fi] = {k: order[v] for k, v in f.items()}
+            for seed in seed_list:
+                jobs.append((fi, fi, seed, (f["train"], f["val"], f["test"])))
+        walk = {"n_folds": len(folds), "purge": purge, "embargo": embargo, "window": window}
+    else:
+        for si, seed in enumerate(seed_list):
+            tr, va, te = _make_split(groups, y, task, test_size, val_size, seed)
+            splits[seed] = {"train": order[tr], "val": order[va], "test": order[te]}
+            jobs.append((si, seed, seed, (tr, va, te)))
+    n_runs = len(jobs)
+
     warmup()  # PyTorch's one-time start-up cost would otherwise be billed to the first model's 'fit s'
     keys = CLASSIFICATION_METRICS if task == "classification" else REGRESSION_METRICS
-    scores = {l: {k: np.full(len(seed_list), np.nan) for k in keys} for l in names}
-    seconds = {l: np.full(len(seed_list), np.nan) for l in names}
+    scores = {l: {k: np.full(n_runs, np.nan) for k in keys} for l in names}
+    seconds = {l: np.full(n_runs, np.nan) for l in names}
     errors = {l: [] for l in names}
-    splits = {}
-    for si, seed in enumerate(seed_list):
-        tr, va, te = _make_split(groups, y, task, test_size, val_size, seed)
-        splits[seed] = {"train": tr, "val": va, "test": te}
+    predictions = {l: [] for l in names}
+    for ri, (unit, _, seed, (tr, va, te)) in enumerate(jobs):
         ytr, yva, yte = y[tr], y[va], y[te]
         for label, factory, is_baseline in entries:
             scaled = task == "regression" and scale_target and not is_baseline
             mu, sd = (float(ytr.mean()), float(ytr.std()) or 1.0) if scaled else (0.0, 1.0)
             try:
-                t0 = time.perf_counter()
+                t0 = time_.perf_counter()
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     model = factory(seed)
@@ -472,7 +666,7 @@ def benchmark(models, X, y, groups=None, seeds=5, baselines=True, *, task="auto"
                     else:
                         _fit(model, X[tr], (ytr - mu) / sd if scaled else ytr, X[va],
                              (yva - mu) / sd if scaled else yva, epochs)
-                seconds[label][si] = time.perf_counter() - t0
+                seconds[label][ri] = time_.perf_counter() - t0
                 pred = np.asarray(model.predict(X[te]))
                 if task == "regression":
                     pred = pred.reshape(len(te)) * sd + mu
@@ -481,19 +675,35 @@ def benchmark(models, X, y, groups=None, seeds=5, baselines=True, *, task="auto"
                     if pred.shape != yte.shape:
                         raise ValueError("predict returned shape %s, expected %s" % (pred.shape, yte.shape))
                     got = _classification_metrics(yte, pred)
+                    proba = None
+                    if hasattr(model, "predict_proba"):
+                        try:  # a model without usable probabilities just scores n/a on the probability metrics
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                proba = np.asarray(model.predict_proba(X[te]), dtype=float)
+                            classes = getattr(model, "classes_", None)
+                            classes = np.unique(ytr) if classes is None else np.asarray(classes)
+                            if proba.shape != (len(te), len(classes)) or not np.isfinite(proba).all():
+                                proba = None
+                            else:
+                                got.update(_proba_metrics(yte, proba, classes))
+                        except Exception:
+                            proba = None
+                    if proba is not None and keep_predictions:
+                        predictions[label].append({"y": yte, "proba": proba.astype(np.float32), "classes": classes})
                 for k, v in got.items():
-                    scores[label][k][si] = v
+                    scores[label][k][ri] = v
             except Exception as exc:  # one broken model must not hide the others
-                errors[label].append((seed, "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:120]
-                                                         if str(exc) else "")))
+                msg = "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:120] if str(exc) else "")
+                errors[label].append((seed, ("fold %d: " % unit if wf else "") + msg))
     share = None
     if task == "classification":
         _, counts = np.unique(y, return_counts=True)
         share = float(counts.max() / len(y))
     result = BenchmarkResult(task, metric, seed_list, names, [e[0] for e in entries if e[2]], scores, seconds,
                              errors, splits, groups is not None,
-                             0 if groups is None else len(np.unique(groups)), X.shape, notes, share)
+                             0 if groups is None else len(np.unique(groups)), X.shape, notes, share,
+                             run_units=[j[0] for j in jobs], walk=walk, predictions=predictions)
     if show:
         print(result)
     return result
-

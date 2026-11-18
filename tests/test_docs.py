@@ -41,5 +41,5 @@ def test_generated_table_lists_every_visible_entry_once():
 def test_kinds_are_assigned_and_descriptions_are_not_empty():
     for n in sc.available():
         cls = REGISTRY[n]
-        assert _docs.kind_of(cls) in {"model", "classical", "agent", "tool"}
+        assert _docs.kind_of(cls) in {"model", "classical", "wrapper", "agent", "tool"}
         assert _docs.summary_of(cls), n

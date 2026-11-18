@@ -19,10 +19,12 @@ from .base import BaseModel, register
 
 class SequenceModel(BaseModel):
     family = "sequence"
+    readouts = ("last", "mean", "all")  # a model class that supports more (e.g. "max") lists them here
 
     def __init__(self, hidden=32, readout="last", vocab_size=None, tbptt=None, **kw):
-        if readout not in ("last", "mean", "all"):
-            raise ValueError("readout must be 'last', 'mean' or 'all'")
+        if readout not in self.readouts:
+            names = ["'%s'" % r for r in self.readouts]
+            raise ValueError("readout must be %s or %s" % (", ".join(names[:-1]), names[-1]))
         if vocab_size:
             kw["normalize"] = False
         super().__init__(**kw)
@@ -89,6 +91,8 @@ class Core(nn.Module):
     no_all = False  # True if the core cannot produce one output per step
 
     def pool(self, y, mode):
+        if mode == "max":
+            return y.max(1).values
         return y[:, -1] if mode == "last" else y.mean(1)
 
 
@@ -255,6 +259,37 @@ class MambaCore(Core):
         return x
 
 
+class ConvBlock(nn.Module):
+    """Pre-norm residual block of 1-D convolutions over time; input and output are (B, T, H). Dilation spaces the
+    kernel taps ``dilation`` steps apart. causal=True pads on the left only, so step t never sees steps after t."""
+
+    def __init__(self, hidden, kernel, dilation, causal, n_convs, dropout):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden)
+        self.convs = nn.ModuleList([nn.Conv1d(hidden, hidden, kernel, dilation=dilation) for _ in range(n_convs)])
+        span = (kernel - 1) * dilation
+        self.pad = (span, 0) if causal else (span // 2, span - span // 2)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        z = self.norm(x).transpose(1, 2)
+        for conv in self.convs:
+            z = self.drop(F.gelu(conv(F.pad(z, self.pad))))
+        return x + z.transpose(1, 2)
+
+
+class ConvCore(Core):
+    def __init__(self, hidden, kernel, dilations, causal, n_convs, dropout=0.0):
+        super().__init__()
+        self.blocks = nn.ModuleList([ConvBlock(hidden, kernel, d, causal, n_convs, dropout) for d in dilations])
+        self.norm, self.out_dim, self.causal = nn.LayerNorm(hidden), hidden, causal
+
+    def forward(self, x):
+        for b in self.blocks:
+            x = b(x)
+        return self.norm(x)
+
+
 class PlasticCore(Core):
     """Differentiable plasticity (Miconi et al., 2018): every connection has a fixed weight
     plus alpha * Hebb, where the Hebbian trace is updated during the sequence and alpha is
@@ -382,6 +417,62 @@ class Mamba(_CoreModel):
 
     def make_core(self):
         return MambaCore(self.hidden, self.n_layers, self.state_dim)
+
+
+@register("cnn1d", family="sequence")
+class CNN1D(_CoreModel):
+    """1-D convolutional network over time: n_layers residual convolution blocks (kernel_size), then global pooling
+    (readout 'mean' by default, or 'max'). Looks at both sides of every step, so it finds a pattern wherever it occurs
+    but cannot do next-token prediction (that would leak the answer); use tcn for that."""
+    readouts = ("last", "mean", "all", "max")
+
+    def __init__(self, hidden=32, n_layers=3, kernel_size=5, dropout=0.0, readout="mean", **kw):
+        if n_layers < 1 or kernel_size < 1:
+            raise ValueError("n_layers and kernel_size must be at least 1")
+        super().__init__(hidden=hidden, readout=readout, **kw)
+        self.n_layers, self.kernel_size, self.dropout = n_layers, kernel_size, dropout
+
+    @property
+    def receptive_field(self):
+        """Steps of input that influence one output step."""
+        return 1 + self.n_layers * (self.kernel_size - 1)
+
+    def make_core(self):
+        return ConvCore(self.hidden, self.kernel_size, [1] * self.n_layers, causal=False, n_convs=1, dropout=self.dropout)
+
+    def fit(self, X, y=None, epochs=None, val_data=None):
+        if y is None:
+            raise ValueError("cnn1d sees the whole window, so next-token prediction would leak the answer; use tcn")
+        return super().fit(X, y, epochs=epochs, val_data=val_data)
+
+    def generate(self, prompt, n_new=10):
+        raise ValueError("cnn1d cannot generate continuations (it is not causal); use tcn")
+
+
+@register("tcn", family="sequence")
+class TCN(_CoreModel):
+    """Temporal convolutional network (Bai et al., 2018): n_layers residual blocks of two dilated causal convolutions,
+    dilation 1, 2, 4, ... so the receptive field grows exponentially. Causal: step t never sees later steps, so it also
+    works for next-token prediction. Default readout 'last'; 'max' and 'mean' pool over the window."""
+    readouts = ("last", "mean", "all", "max")
+
+    def __init__(self, hidden=32, n_layers=4, kernel_size=3, dropout=0.0, readout="last", **kw):
+        if n_layers < 1 or kernel_size < 2:
+            raise ValueError("n_layers must be at least 1 and kernel_size at least 2")
+        super().__init__(hidden=hidden, readout=readout, **kw)
+        self.n_layers, self.kernel_size, self.dropout = n_layers, kernel_size, dropout
+
+    @property
+    def dilations(self):
+        return [2 ** i for i in range(self.n_layers)]
+
+    @property
+    def receptive_field(self):
+        """Steps of input (the current one and this many minus one before it) that influence one output step."""
+        return 1 + 2 * (self.kernel_size - 1) * sum(self.dilations)
+
+    def make_core(self):
+        return ConvCore(self.hidden, self.kernel_size, self.dilations, causal=True, n_convs=2, dropout=self.dropout)
 
 
 @register("plastic_rnn", family="sequence")

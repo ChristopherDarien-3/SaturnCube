@@ -21,17 +21,21 @@ FAMILY_NOTES = {
     "vision": "Input: images as `(n, C, H, W)` or `(n, H, W)`.",
     "graph": "Input: `Graph` / `Tree` containers (dense adjacency, so small and medium graphs).",
     "metric": "Few-shot: `predict(X, support=(X_support, y_support))` works on unseen classes.",
+    "wrapper": "Each wraps another model: pass its registry name or class as the first argument.",
 }
 
 FAMILY_ORDER = ["vector", "vision", "bio", "sequence", "memory", "metric", "graph", "unsupervised", "classical",
-                "agent", "bandit", "search", "symbolic", "cognition", "verification", "codegen", "experiment"]
+                "wrapper", "agent", "bandit", "search", "symbolic", "cognition", "verification", "codegen", "experiment"]
 
 
 def kind_of(cls):
     """model: shared fit/predict/evaluate/save interface; classical: NumPy learner with fit/predict;
-    agent: learns by interacting with an environment or bandit; tool: a plain Python helper class."""
+    wrapper: wraps another model (calibration, seed ensemble); agent: learns by interacting with an environment or
+    bandit; tool: a plain Python helper class."""
     if issubclass(cls, BaseModel):
         return "model"
+    if cls.family == "wrapper":
+        return "wrapper"
     if cls.family == "classical":
         return "classical"
     if cls.family in ("agent", "bandit"):
@@ -54,12 +58,14 @@ def summary_of(cls):
 def registry_markdown():
     names = available()
     kinds = Counter(kind_of(REGISTRY[n]) for n in names)
-    out = ["%d registered entries (`sc.available()`): %d models, %d classical learners, %d agents and bandits, "
-           "%d tools." % (len(names), kinds["model"], kinds["classical"], kinds["agent"], kinds["tool"]),
+    out = ["%d registered entries (`sc.available()`): %d models, %d classical learners, %d wrappers, %d agents and "
+           "bandits, %d tools." % (len(names), kinds["model"], kinds["classical"], kinds["wrapper"], kinds["agent"],
+                                   kinds["tool"]),
            "",
            "`model` entries share one `fit` / `predict` / `evaluate` / `save` / `load` interface and expose "
-           "`.module`. `classical` entries have `fit` / `predict` only. `agent` entries learn from an "
-           "environment or bandit instead of a dataset. `tool` entries are plain Python classes with their "
+           "`.module`. `classical` entries have `fit` / `predict` only. `wrapper` entries wrap another "
+           "model and add calibration or averaging. `agent` entries learn from an environment or bandit instead of a "
+           "dataset. `tool` entries are plain Python classes with their "
            "own methods. Build any of them with `sc.create(name, **kwargs)`.", ""]
     families = [f for f in FAMILY_ORDER if any(REGISTRY[n].family == f for n in names)]
     families += sorted({REGISTRY[n].family for n in names} - set(families))  # a new family still shows up

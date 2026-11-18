@@ -1,6 +1,24 @@
 # Changelog
 
 ## Unreleased
+- **Probabilities and calibration:** `sc.log_loss`, `brier_score`, `expected_calibration_error`, `reliability_table` and
+  `format_reliability`; `sc.PriorShift` (class-frequency correction estimated from labels), `sc.TemperatureScaler`, and
+  `sc.Calibrated` (fits both on validation rows only, wraps any classifier). `class_weight=` (`"balanced"`, dict or list) for
+  models that train with the standard cross-entropy; models with their own loss warn.
+- **`sc.benchmark`:** `log_loss`, `brier` and `ece` as metrics (a `log_loss` column appears for classifiers with `predict_proba`),
+  `result.reliability(model)`, stored test probabilities (`keep_predictions`). **Breaking:** the classification baseline is now
+  labelled `class prior` (it was `majority class`) and gives the training class frequencies as probabilities, so its log loss is
+  meaningful. `test_size` / `val_size` now default to `None` (0.25 / 0.15, or 0.1 / 0.1 for walk-forward). Failure notes say
+  "runs", not "seeds".
+- **Walk-forward validation:** `benchmark(..., split="walk_forward", n_folds, purge, embargo, window, time)`, `result.fold_table()`
+  and `sc.walk_forward_splits`. With walk-forward the table's mean ± std is over folds (seeds are averaged within a fold).
+- **`sc.SeedEnsemble`:** n seeds of one model averaged, with member probabilities and a disagreement measure.
+- **`cnn1d` and `tcn`** in the sequence family (`(n, T, d)` or tokens), with `readout="max"` available for these two. `tcn` also does
+  next-token prediction; `cnn1d` refuses it because it is not causal.
+- New registry family `wrapper` (`calibrated`, `seed_ensemble`), shown in the generated README table. `base.resolve_model` accepts a
+  registry name or a class.
+- docs/CONV_SEQUENCE.md and scripts/bench_conv_vs_rnn.py: the benchmark behind the `cnn1d` / `tcn` claims. The scripts now run from
+  a clone without installing the package.
 - **Behaviour change:** `patience` now defaults to `"auto"`: 10 for regression, off for classification. Regression fits that used to
   run all `epochs` now hold out `val_split` (10%) of the training rows and may stop early with the best weights restored. The
   automatic default needs at least 20 held-out rows (`AUTO_MIN_VAL_ROWS`) and never warns; `patience=None` restores the old behaviour.

@@ -20,7 +20,7 @@ from .deeprl import (DQN, DoubleDQN, DuelingDQN, PrioritizedDQN, REINFORCE, Acto
 
 from .sequence import (SimpleRNN, ElmanNetwork, LSTM, GRU, BidirectionalRNN, BidirectionalLSTM,
                        BidirectionalGRU, ContinuousTimeRNN, NeuralStateSpace, S4, Mamba, PlasticRNN,
-                       JordanNetwork, EchoStateNetwork, LiquidStateMachine, RTRLRNN)
+                       JordanNetwork, EchoStateNetwork, LiquidStateMachine, RTRLRNN, CNN1D, TCN)
 
 from .attention import (MultiHeadAttention, LinearAttention, TransformerLayer, TransformerEncoder,
                         TransformerDecoder, LinearAttentionTransformer, LocalAttentionTransformer,
@@ -63,7 +63,10 @@ from .spiking import SpikingNetwork, SelfOrganizingMap, LIFLayer
 
 from .data import (load_dataset, Dataset, Prepared, Pipeline, TabularPreprocessor, Report, auto_model, AutoResult,
                    load_pipeline, check_arrays, split_indices)
-from .evaluation import benchmark, BenchmarkResult
+from .evaluation import benchmark, BenchmarkResult, walk_forward_splits
 from .text import TextVectorizer, TokenEncoder, TextModel
+from .calibration import (log_loss, brier_score, expected_calibration_error, reliability_table, format_reliability,
+                          PriorShift, TemperatureScaler, Calibrated)
+from .ensemble import SeedEnsemble
 
 __version__ = "0.7.0"

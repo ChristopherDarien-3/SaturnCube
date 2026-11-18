@@ -19,7 +19,7 @@ for name in ["mlp", "resnet", "kan", "deq"]:
     print(name, m.evaluate(X_test, y_test)["accuracy"])
 ```
 
-> **Status: v0.7, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between releases.
+> **Status: v0.7, alpha.** Implemented: vector/tabular, image (CNN), sequence, attention, memory, metric/few-shot, graph/tree/pointer, spiking and biologically inspired, unsupervised and self-supervised models; alternative learning rules; many optimizers; continual and meta-learning; tabular and deep RL; plus search, program-synthesis, retrieval, verification, code-generation, experiment-design and classical-ML tools (see below). The API may change between 0.x releases.
 
 ## Why
 
@@ -37,7 +37,7 @@ PyTorch, install `torch` first following https://pytorch.org, then install Satur
 From source:
 
 ```bash
-git clone https://github.com/ChristopherDarien-3/SaturnCube
+git clone <this repository>
 cd saturncube
 pip install -e ".[dev]"
 ```
@@ -107,9 +107,16 @@ print(result.to_rows()[0])      # raw numbers; also result.scores[model][metric]
   class), and the table says so, because that can inflate scores when rows share a source.
 - **Seeds.** Each seed changes the split and the model initialisation. The table reports mean ± std over seeds and, for
   each model, the paired difference to the best baseline; `~` marks a difference smaller than its own seed noise.
-- **Baselines.** A majority-class guess (train mean for regression) and a standardised scikit-learn linear model
-  (logistic or ridge regression) are added automatically; `baselines=False` turns them off. scikit-learn is optional
-  (`pip install saturncube[bench]`); without it only the first baseline runs and the table says so.
+- **Baselines.** A class-prior baseline (it predicts the most frequent class and gives the training class frequencies as its
+  probabilities; train mean for regression) and a standardised scikit-learn linear model (logistic or ridge regression)
+  are added automatically; `baselines=False` turns them off. scikit-learn is optional (`pip install saturncube[bench]`);
+  without it only the first baseline runs and the table says so.
+- **Probability metrics.** For classifiers with `predict_proba` the table adds `log_loss`, and `brier` and `ece` are in
+  `result.scores`; rank by any of them with `metric="log_loss"` (lower is better; a model with no `predict_proba` scores n/a).
+  `result.reliability("mlp")` is the pooled calibration table. Accuracy can look fine while the probabilities are not: see
+  the example below.
+- **Time series.** `split="walk_forward"` runs forward-chaining folds with a purge gap instead of random splits; see
+  "Time series" below.
 - **Same data for everyone.** Every model and baseline trains on the same training rows, and the test rows are never
   passed to `fit()`. The validation part goes to `fit(val_data=...)` for models that accept it, so `patience=` (including the regression default) works inside `sc.benchmark` using that split. For regression, models
   are trained on a standardised target and scored on the original scale.
@@ -119,24 +126,112 @@ print(result.to_rows()[0])      # raw numbers; also result.scores[model][metric]
 
 Output on a synthetic problem built so that labels cannot be learned across groups (40 groups of 25 rows, each group
 a tight cluster, labels unrelated to the clusters). A random-row split of the same data gives `random_forest`
-1.00 accuracy because it memorises the clusters; the grouped split gives 0.50, which is the honest number:
+1.00 accuracy because it memorises the clusters; the grouped split gives 0.50, which is the honest number. The `log_loss`
+column shows the other half of the story: the `mlp` is right 64% of the time on unseen groups, but its log loss (4.05) is far
+worse than the class prior's (0.71), because it is confidently wrong:
 
 ```text
 SaturnCube benchmark: classification, 1000 rows, 3 seeds
 split: group-disjoint over 40 groups; per seed about train 600 / val 150 / test 250 rows
 largest class = 50.0% of all rows
 
-model                                       accuracy  balanced_accuracy  vs best baseline  fit s   ok
--------------------------------------  -------------  -----------------  ----------------  -----  ---
-mlp                                    0.636 ± 0.200      0.636 ± 0.200  +0.033 ± 0.344 ~   1.10  3/3
-scaled logistic regression (baseline)  0.603 ± 0.176      0.603 ± 0.176                 -   0.00  3/3
-naive_bayes                            0.581 ± 0.155      0.581 ± 0.155  -0.021 ± 0.156 ~   0.00  3/3
-majority class (baseline)              0.500 ± 0.000      0.500 ± 0.000                 -   0.00  3/3
-random_forest                          0.497 ± 0.096      0.497 ± 0.096  -0.105 ± 0.200 ~   0.14  3/3
+model                                       accuracy  balanced_accuracy         log_loss  vs best baseline  fit s   ok
+-------------------------------------  -------------  -----------------  ---------------  ----------------  -----  ---
+mlp                                    0.636 ± 0.200      0.636 ± 0.200    4.051 ± 2.912  +0.033 ± 0.344 ~   0.44  3/3
+scaled logistic regression (baseline)  0.603 ± 0.176      0.603 ± 0.176  0.9424 ± 0.1059                 -   0.01  3/3
+naive_bayes                            0.581 ± 0.155      0.581 ± 0.155  0.9091 ± 0.0113  -0.021 ± 0.156 ~   0.00  3/3
+class prior (baseline)                 0.500 ± 0.000      0.500 ± 0.000  0.7133 ± 0.0105                 -   0.00  3/3
+random_forest                          0.497 ± 0.096      0.497 ± 0.096   1.103 ± 0.3251  -0.105 ± 0.200 ~   0.10  3/3
 
 std is over seeds (each seed changes the split and the model initialisation)
-~ = difference within seed noise (|mean| <= std of the paired difference)
+~ = difference within noise (|mean| <= std of the paired difference)
+result.reliability(model) gives the calibration table; log_loss, brier and ece need predict_proba
 ```
+
+## Probabilities and calibration
+
+Accuracy says how often the top class is right; it says nothing about whether "80% sure" means 80%. These tools measure and
+repair the probabilities.
+
+```python
+import saturncube as sc
+
+sc.log_loss(y, proba, classes=model.classes_)               # lower is better; a constant guess scores the label entropy
+sc.brier_score(y, proba, classes=model.classes_)            # 0 = perfect, (k-1)/k for a uniform guess
+sc.expected_calibration_error(y, proba, classes=model.classes_)
+print(sc.format_reliability(sc.reliability_table(y, proba, classes=model.classes_)))
+
+cal = sc.Calibrated("mlp", epochs=40).fit(X_train, y_train, val_data=(X_val, y_val))
+cal.predict_proba(X_test); cal.evaluate(X_test, y_test)     # accuracy, log_loss, brier, ece
+
+model = sc.create("mlp", class_weight="balanced")           # also {label: weight} or one weight per class
+```
+
+- **`Calibrated`** trains the wrapped model on the training rows, then fits two corrections on the *validation* rows only. The
+  prior-shift correction reweights the probabilities by `validation class frequency / training class frequency`
+  (`sc.PriorShift`, one pseudo-count per class so a missing class does not become zero), which is exact when only the class
+  frequencies changed between the periods. Temperature scaling (`sc.TemperatureScaler`) divides the log-probabilities by a
+  temperature fitted to minimise validation log loss: it softens over-confident and sharpens under-confident
+  probabilities and never changes the predicted class. It wraps any registered classifier, including `SeedEnsemble`
+  (`sc.Calibrated("seed_ensemble", model="mlp", n=5)`), and inside `sc.benchmark` it receives the harness's validation rows.
+- **`class_weight`** (`None`, `"balanced"` = n / (k · count), a `{label: weight}` dict, or one weight per class) reweights the
+  cross-entropy loss, which raises minority-class recall at some cost in precision. It applies to models that train with the
+  standard cross-entropy; a model with its own loss (for example `elm`, the metric learners) warns that it is ignored. The
+  weights are fixed at the first fit and are saved with the model. `Calibrated` takes them into account when it estimates
+  the effective training prior.
+- **Limits.** The prior-shift correction assumes only the class frequencies changed (not how the features look within a
+  class) and is only as good as the validation period is like deployment; small validation sets give noisy estimates.
+  Temperature scaling cannot fix a model whose ranking is wrong. `expected_calibration_error` uses 10 equal-width bins on the
+  top class and is biased upwards with few rows. Tested on synthetic data with known answers (exact Bayes correction,
+  recovered planted temperatures), not on real data collections.
+
+## Time series: walk-forward validation
+
+Random splits let a model train on rows from the future of its test rows, and overlapping windows make neighbouring rows
+near-copies. `split="walk_forward"` runs forward-chaining folds instead:
+
+```python
+# rows in time order; features look back 32 steps, labels look ahead 8: purge at least 32 + 8 - 1 rows
+res = sc.benchmark(["mlp", "gru", "tcn"], X_windows, y, split="walk_forward", n_folds=5, purge=39, seeds=3)
+print(res)               # mean ± std over folds
+print(res.fold_table())  # every model in every fold: how results move across periods
+```
+
+```text
+|<- train ->| purge |<- val ->| purge |<- test ->|        the test blocks are consecutive and cover the
+                                                           last n_folds * test_size of the series
+```
+
+- **Folds, not seeds, are the unit.** Each fold's value is the mean over its seeds, and the table's std is across folds: the
+  spread across periods. `test_size` and `val_size` are per fold (default 0.1 each); `sc.walk_forward_splits(n, ...)` returns the
+  row positions if you want to use the folds yourself.
+- **`purge`** drops rows before the validation block and before the test block. If a row's features look back `window` rows and
+  its label looks ahead `horizon` rows, use `purge >= window + horizon - 1`, otherwise the last training rows share bars with
+  the first test rows. **`embargo`** additionally drops rows right after each earlier test block from later folds' training
+  sets (a conservative extra on top of purge). **`window=k`** makes the training window rolling (the last `k` rows) instead
+  of expanding.
+- **Order.** Rows are taken in the order given; `time=` sorts them first and reports indices into your original arrays. Groups
+  cannot be combined with walk-forward. For classification the first training window must contain every class.
+- **Not handled for you:** `benchmark` takes arrays, so anything computed from the whole series before the call (your own
+  scaling, labels built from future bars, indicator warm-ups) can still leak the future into the folds. The models standardise
+  inputs using their training rows only.
+
+## Seed ensembles
+
+```python
+ens = sc.SeedEnsemble("mlp", n=5, seed=0, epochs=40).fit(X_train, y_train, val_data=(X_val, y_val))
+ens.predict_proba(X_test)      # the mean of the five members' probabilities
+ens.disagreement(X_test)       # per row: how much the members disagree
+```
+
+`SeedEnsemble` trains `n` copies of one model that differ only in their seed (derived from `seed` with numpy's `SeedSequence`, so
+they are independent and reproducible) and averages them. For classifiers the log loss of the averaged probabilities can never
+exceed the average of the members' log losses (Jensen's inequality), which is tested on real networks. `average="geometric"`
+averages log-probabilities instead; regression averages the predictions. `disagreement` is the root-mean-square over classes
+of the spread of each class probability across members (classification) or the std of the prediction (regression). It costs
+`n` times the training time, needs a model whose training depends on a seed (it refuses `naive_bayes`), passes `val_data` and
+`epochs` to members that accept them, and works as a model inside `sc.benchmark`
+(`("seed_ensemble", {"model": "mlp", "n": 5})`).
 
 ## Working with text
 
@@ -284,7 +379,7 @@ Every model below uses the same `create(name)` / `fit` / `predict` / `evaluate` 
 | Family | Models (registry names) |
 |---|---|
 | Learning rules (vector) | `forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`, plus `fa`, `dfa` |
-| Sequence (X is `(n, T, d)` or integer tokens with `vocab_size=`) | `rnn`, `elman`, `jordan`, `lstm`, `gru`, `birnn`, `bilstm`, `bigru`, `ctrnn`, `neural_ssm`, `s4`, `mamba`, `plastic_rnn`, `esn`, `lsm`, `rtrl_rnn`; truncated BPTT via `tbptt=k`; next-token prediction via `fit(tokens)` |
+| Sequence (X is `(n, T, d)` or integer tokens with `vocab_size=`) | `rnn`, `elman`, `jordan`, `lstm`, `gru`, `birnn`, `bilstm`, `bigru`, `ctrnn`, `neural_ssm`, `s4`, `mamba`, `plastic_rnn`, `esn`, `lsm`, `rtrl_rnn`, `cnn1d`, `tcn`; truncated BPTT via `tbptt=k`; next-token prediction via `fit(tokens)` |
 | Attention | `transformer_encoder`, `transformer_decoder`, `linear_attention`, `local_attention`, `sparse_attention`, `multi_query`, `grouped_query`, `universal_transformer`, `memory_transformer`, `perceiver`, `ssm_attention_hybrid`, `recurrent_attention`, `retrieval_augmented`, `encoder_decoder`; layers `MultiHeadAttention` (MHA/MQA/GQA, cross-attention), `LinearAttention`, `TransformerLayer` |
 | Memory | `hopfield`, `modern_hopfield`, `associative_memory`, `content_addressable_memory`, `product_key_memory`, `memory_network`, `kv_memory_network`, `ntm`, `dnc` |
 | Metric / few-shot | `siamese`, `triplet`, `twin_tower`, `contrastive_embedding`, `prototypical`, `relation`, `matching` (few-shot: `predict(X, support=(Xs, ys))` on unseen classes) |
@@ -373,9 +468,9 @@ If `lr` is not given, each optimizer uses its own starting learning rate (`satur
 The table below is generated from the registry by `python scripts/update_readme.py`, so it always matches `sc.available()`. Narrative sections for each family are further up.
 
 <!-- registry-table:start -->
-139 registered entries (`sc.available()`): 94 models, 4 classical learners, 21 agents and bandits, 20 tools.
+143 registered entries (`sc.available()`): 96 models, 4 classical learners, 2 wrappers, 21 agents and bandits, 20 tools.
 
-`model` entries share one `fit` / `predict` / `evaluate` / `save` / `load` interface and expose `.module`. `classical` entries have `fit` / `predict` only. `agent` entries learn from an environment or bandit instead of a dataset. `tool` entries are plain Python classes with their own methods. Build any of them with `sc.create(name, **kwargs)`.
+`model` entries share one `fit` / `predict` / `evaluate` / `save` / `load` interface and expose `.module`. `classical` entries have `fit` / `predict` only. `wrapper` entries wrap another model and add calibration or averaging. `agent` entries learn from an environment or bandit instead of a dataset. `tool` entries are plain Python classes with their own methods. Build any of them with `sc.create(name, **kwargs)`.
 
 ### vector (24)
 
@@ -423,7 +518,7 @@ Input: images as `(n, C, H, W)` or `(n, H, W)`.
 | `snn` | `SpikingNetwork` | model | Spiking neural network of leaky integrate-and-fire neurons, trained end to end with surrogate gradients |
 | `som` | `SelfOrganizingMap` | model | Self-Organizing Map (Kohonen): a grid of units whose weight vectors move toward the data so that nearby units respond to similar inputs, giving a topology-preserving 2-D map without labels |
 
-### sequence (30)
+### sequence (32)
 
 Input: `(n, T, d)` floats, or integer tokens `(n, T)` with `vocab_size=`.
 
@@ -432,6 +527,7 @@ Input: `(n, T, d)` floats, or integer tokens `(n, T)` with `vocab_size=`.
 | `bigru` | `BidirectionalGRU` | model | Bidirectional GRU |
 | `bilstm` | `BidirectionalLSTM` | model | Bidirectional LSTM |
 | `birnn` | `BidirectionalRNN` | model | Bidirectional vanilla recurrent network |
+| `cnn1d` | `CNN1D` | model | 1-D convolutional network over time: n_layers residual convolution blocks (kernel_size), then global pooling (readout 'mean' by default, or 'max') |
 | `ctrnn` | `ContinuousTimeRNN` | model | Continuous-time RNN integrated with Euler steps (`dt`, `substeps`) |
 | `elman` | `ElmanNetwork` | model | Elman network: the classic simple recurrent net (hidden state fed back as context) |
 | `encoder_decoder` | `EncoderDecoderTransformer` | model | Sequence-to-sequence Transformer over integer tokens: fit(src, tgt), predict(src) |
@@ -456,6 +552,7 @@ Input: `(n, T, d)` floats, or integer tokens `(n, T)` with `vocab_size=`.
 | `s4` | `S4` | model | Structured state-space sequence model (diagonal S4D variant, FFT convolution) |
 | `sparse_attention` | `SparseAttentionTransformer` | model | Transformer with sparse attention: a local window plus every `stride`-th position |
 | `ssm_attention_hybrid` | `SSMAttentionHybrid` | model | Hybrid of Mamba-style state-space blocks and attention layers |
+| `tcn` | `TCN` | model | Temporal convolutional network (Bai et al., 2018): n_layers residual blocks of two dilated causal convolutions, dilation 1, 2, 4, ... so the receptive field grows exponentially |
 | `transformer_decoder` | `TransformerDecoder` | model | Causal Transformer; use fit(tokens) with vocab_size for language modelling |
 | `transformer_encoder` | `TransformerEncoder` | model | Transformer encoder: bidirectional self-attention with a mean-pooled readout over the sequence |
 | `universal_transformer` | `UniversalTransformer` | model | Universal Transformer: one shared layer applied repeatedly (`n_steps`) |
@@ -538,6 +635,15 @@ Pure NumPy; input: 2-D array `(n_samples, n_features)`.
 | `kmeans` | `KMeans` | classical | k-means with k-means++ seeding and several restarts |
 | `naive_bayes` | `NaiveBayes` | classical | Gaussian naive Bayes |
 | `random_forest` | `RandomForest` | classical | Bagged decision trees with random feature subsets (sqrt(d) for classification, d/3 for regression) |
+
+### wrapper (2)
+
+Each wraps another model: pass its registry name or class as the first argument.
+
+| Registry name | Class | Kind | Description |
+|---|---|---|---|
+| `calibrated` | `Calibrated` | wrapper | Wraps a classifier and corrects its probabilities on validation rows: a prior-shift correction (the validation class frequencies against the training ones) and temperature scaling, both fitted after the model is trained and never on the training rows |
+| `seed_ensemble` | `SeedEnsemble` | wrapper | Trains ``n`` copies of a model that differ only in their random seed and averages their predictions |
 
 ### agent (17)
 
@@ -649,7 +755,8 @@ This is a single small run on toy data, meant to show the interface working, not
 - Image support is a single compact CNN, and the spiking / biologically inspired family has two models (LIF network, SOM); neither is a replacement for a dedicated vision or neuromorphic library.
 - Most models are tested on small synthetic problems only. There is no GPU testing, and no handling of categorical features or missing values.
 - Regression targets are not standardized inside models, so very badly scaled targets may train slowly (`sc.benchmark` and `prepare(scale_target=True)` standardize them for you).
-- `sc.benchmark` compares models on one numeric array (it does not take raw text yet); its linear baseline is deliberately simple, so beating it is a low bar. Group sizes make the actual split fractions approximate, and with few seeds the std itself is noisy.
+- `sc.benchmark` compares models on one numeric array (it does not take raw text yet) and its walk-forward folds are fixed across seeds; its linear baseline is deliberately simple, so beating it is a low bar. Group sizes make the actual split fractions approximate, and with few seeds the std itself is noisy.
+- `cnn1d` and `tcn` are new: on small synthetic motif tasks they matched `gru` but did not beat it, their default readouts (`mean`, `last`) were clearly worse than `readout="max"` on a pattern-anywhere task, and zero padding lets `cnn1d` detect the edges of the window (details in [docs/CONV_SEQUENCE.md](https://github.com/ChristopherDarien-3/SaturnCube/blob/HEAD/docs/CONV_SEQUENCE.md)). No real-data evidence yet.
 - The alternative learning rules (`forward_gradient`, `local_error`, `synthetic_gradients`, `equilibrium_propagation`, `contrastive_hebbian`, `predictive_coding`) need tuning on harder problems.
 - `MoE` evaluates all experts and masks them, so it is correct but not sparse-efficient. `deep_ffn` is deliberately large for toy problems; shrink `hidden` for small datasets.
 - Graph models use dense adjacency, so they suit up to a few thousand nodes in total. Deep RL is tested on tiny environments.

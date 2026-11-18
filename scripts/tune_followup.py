@@ -3,6 +3,11 @@
     python scripts/tune_followup.py                  # writes ./tune_followup.json; needs scikit-learn
 """
 import json, sys, warnings
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # run from a clone without installing
+
 import numpy as np
 import saturncube as sc
 from saturncube.evaluation import _make_split

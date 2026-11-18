@@ -3,6 +3,11 @@
     python scripts/tune_defaults.py [dataset ...]     # appends to ./tune_results.jsonl; needs scikit-learn
 """
 import json, sys, time, warnings
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # run from a clone without installing
+
 import numpy as np
 import saturncube as sc
 from sklearn.datasets import load_wine, load_breast_cancer, load_digits, load_diabetes, make_classification

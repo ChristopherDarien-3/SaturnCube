@@ -44,6 +44,22 @@ def register(name, family="vector", hidden=False):
     return deco
 
 
+def resolve_model(model):
+    """A registry name or a class -> the class. Wrappers (Calibrated, SeedEnsemble, ...) use this to accept both."""
+    import difflib
+    if isinstance(model, str):
+        key = model.lower()
+        if key not in REGISTRY:
+            close = difflib.get_close_matches(key, list(REGISTRY), n=3)
+            raise ValueError("unknown model %r%s; see sc.available()" % (
+                model, " (did you mean %s?)" % ", ".join(map(repr, close)) if close else ""))
+        return REGISTRY[key]
+    if isinstance(model, type):
+        return model
+    raise TypeError("model must be a registry name or a class, not %s (an instance cannot be rebuilt per fit)"
+                    % type(model).__name__)
+
+
 def available(family=None, include_hidden=False):
     """Names of registered entries, optionally filtered by family. Hidden helpers (for example the
     `unit_tests` runner, which is not a model) are left out unless include_hidden=True."""
@@ -91,7 +107,8 @@ class BaseModel:
     def __init__(self, input_dim=None, output_dim=None, task="auto", lr=None,
                  epochs=60, batch_size=64, weight_decay=0.0, normalize=True,
                  patience="auto", device=None, seed=None, verbose=False,
-                 optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None, val_split=0.1):
+                 optimizer="adam", optimizer_kwargs=None, classes=None, strategies=None, val_split=0.1,
+                 class_weight=None):
         if task not in ("auto", "classification", "regression"):
             raise ValueError("task must be 'auto', 'classification' or 'regression'")
         self.input_dim, self.output_dim, self.task = input_dim, output_dim, task
@@ -105,6 +122,10 @@ class BaseModel:
         if not 0 <= val_split < 0.5:
             raise ValueError("val_split must be in [0, 0.5)")
         self.val_split = val_split  # share of training rows held out for early stopping when patience is set
+        if not (class_weight is None or class_weight == "balanced" or isinstance(class_weight, (dict, list, tuple, np.ndarray))):
+            raise ValueError("class_weight must be None, 'balanced', a {label: weight} dict, or one weight per class")
+        self.class_weight = class_weight
+        self.class_weight_ = self._cw = None  # per-class weights actually used (set at the first fit)
         self.optimizer, self.optimizer_kwargs = optimizer, dict(optimizer_kwargs or {})
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if seed is not None:
@@ -149,7 +170,10 @@ class BaseModel:
         if self.task == "classification":
             self.classes_ = self._declared_classes if self._declared_classes is not None else np.unique(y)
             d_out = len(self.classes_)
+            self._set_class_weight(y)
         else:
+            if self.class_weight is not None:
+                warnings.warn("class_weight only applies to classification; it is ignored for regression", stacklevel=4)
             d_out = 1 if y.ndim == 1 else y.shape[-1]
         if self.output_dim not in (None, d_out):
             raise ValueError(f"output_dim={self.output_dim} but data implies {d_out}")
@@ -161,6 +185,34 @@ class BaseModel:
         self._module = self.build(d_in, d_out).to(self.device)
         if hasattr(self._module, "init_from_data"):
             self._module.init_from_data(self._norm(X))
+
+    def _set_class_weight(self, y=None):
+        """Per-class loss weights in classes_ order. 'balanced' = n / (k * count), from the labels of the first fit;
+        a dict maps labels to weights (missing labels get 1); a sequence gives one weight per class."""
+        cw, k = self.class_weight, len(self.classes_)
+        if cw is None:
+            return
+        if type(self)._loss is not BaseModel._loss or type(self)._fit is not BaseModel._fit:
+            warnings.warn("%s trains with its own loss, so class_weight is not used" % type(self).__name__, stacklevel=4)
+            return
+        if isinstance(cw, str):
+            if y is None:
+                return  # 'balanced' needs labels; prepare() has none
+            counts = np.array([(np.asarray(y) == c).sum() for c in self.classes_], dtype=float)
+            w = np.where(counts > 0, len(np.asarray(y)) / (k * np.maximum(counts, 1)), 1.0)
+        elif isinstance(cw, dict):
+            unknown = [c for c in cw if c not in set(self.classes_.tolist())]
+            if unknown:
+                raise ValueError("class_weight has labels %s that are not among the classes %s" % (unknown, self.classes_.tolist()))
+            w = np.array([float(cw.get(c, 1.0)) for c in self.classes_.tolist()])
+        else:
+            w = np.asarray(cw, dtype=float)
+            if w.shape != (k,):
+                raise ValueError("class_weight needs one weight per class (%d), got shape %s" % (k, w.shape))
+        if not np.all(np.isfinite(w)) or np.any(w < 0) or not w.any():
+            raise ValueError("class weights must be finite, non-negative and not all zero")
+        self.class_weight_ = w
+        self._cw = torch.tensor(w, dtype=torch.float32, device=self.device)
 
     def _norm(self, X):
         if self.normalize and self._mu is not None:
@@ -181,7 +233,7 @@ class BaseModel:
         if self.task == "classification":
             if out.dim() == 3:  # per-step outputs of sequence models
                 out, y = out.reshape(-1, out.shape[-1]), y.reshape(-1)
-            return F.cross_entropy(out, y)
+            return F.cross_entropy(out, y, weight=self._cw)
         return F.mse_loss(out, y)
 
     # ---- training ------------------------------------------------------------
@@ -201,6 +253,7 @@ class BaseModel:
         self.task, self.input_dim, self.output_dim, self.normalize = task, input_dim, output_dim, False
         if task == "classification":
             self.classes_ = np.arange(output_dim) if classes is None else np.asarray(classes)
+            self._set_class_weight(None)
         self._module = self.build(input_dim, output_dim).to(self.device)
         return self
 
@@ -374,7 +427,7 @@ class BaseModel:
             "cls": type(self).__name__, "init_args": (args, kwargs),
             "state": self._module.state_dict(), "task": self.task,
             "dims": (self.input_dim, self.output_dim), "classes": self.classes_,
-            "norm": (self._mu, self._sd),
+            "norm": (self._mu, self._sd), "class_weight_": self.class_weight_,
         }, path)
 
     @classmethod
@@ -387,6 +440,9 @@ class BaseModel:
         obj.task, obj.classes_ = ck["task"], ck["classes"]
         obj.input_dim, obj.output_dim = ck["dims"]
         obj._mu, obj._sd = ck["norm"]
+        if ck.get("class_weight_") is not None:
+            obj.class_weight_ = ck["class_weight_"]
+            obj._cw = torch.tensor(obj.class_weight_, dtype=torch.float32, device=obj.device)
         obj._module = obj.build(*ck["dims"]).to(obj.device)
         obj._module.load_state_dict(ck["state"])
         return obj
